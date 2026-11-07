@@ -7,6 +7,10 @@ defaults:
   run:
     shell: bash
 
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -30,7 +34,14 @@ jobs:
       - name: Install host build dependencies
         run: |
           apt-get update
-          apt-get install -y $(cat .github/workflows/apt-deps.txt)
+          apt-get install -y ccache $(cat .github/workflows/apt-deps.txt)
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-armv7-${{ github.run_id }}
+          restore-keys: ccache-armv7-
 
       - name: Generate soh.o2r
         run: |
@@ -41,9 +52,9 @@ jobs:
       - name: Switch to 32-bit (armeabi-v7a)
         run: |
           sed -i "s/abiFilters 'arm64-v8a'/abiFilters 'armeabi-v7a'/g" Android/app/build.gradle
-          sed -i 's/"-DBUILD_REMOTE_CONTROL=1"/"-DBUILD_REMOTE_CONTROL=1", "-DANDROID_ARM_NEON=TRUE"/g' Android/app/build.gradle
+          sed -i 's/"-DBUILD_REMOTE_CONTROL=1"/"-DBUILD_REMOTE_CONTROL=1", "-DANDROID_ARM_NEON=TRUE", "-DCMAKE_C_COMPILER_LAUNCHER=ccache", "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"/g' Android/app/build.gradle
           sed -i 's/storeFile file(storeFile)/storeFile file(project.storeFile)/' Android/app/build.gradle
-          grep -n "abiFilters\|ANDROID_ARM_NEON" Android/app/build.gradle
+          grep -n "abiFilters\|ANDROID_ARM_NEON\|storeFile" Android/app/build.gradle
 
       - name: Apply patches (if any)
         run: |
@@ -80,7 +91,30 @@ jobs:
           cd Android
           ./gradlew --no-daemon assembleRelease \
             -PstoreFile=release.jks -PstorePassword=sohandroid \
-            -PkeyAlias=soh -PkeyPassword=sohandroid
+            -PkeyAlias=soh -PkeyPassword=sohandroid 2>&1 | tee ../build.log
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-armv7-${{ github.run_id }}
+
+      - name: Summarize errors
+        if: failure()
+        run: |
+          echo "===== FAILED targets ====="
+          grep -n "FAILED:" build.log | cut -c1-300 | head -20 || true
+          echo "===== First errors ====="
+          grep -n -m 30 -E "error:|fatal error|undefined reference" build.log | cut -c1-400 || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
