@@ -1,0 +1,88 @@
+name: Build armv7 (32-bit) APK
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: djvdw7f2ro/android-builder-soh:v1.0.4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Allow git in container
+        run: git config --global --add safe.directory '*'
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > Android/local.properties
+          echo "ndk.dir=${ANDROID_NDK_HOME}" >> Android/local.properties
+
+      - name: Install host build dependencies
+        run: |
+          apt-get update
+          apt-get install -y $(cat .github/workflows/apt-deps.txt)
+
+      - name: Generate soh.o2r
+        run: |
+          cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux --target GenerateSohOtr --parallel
+          cp soh/soh.o2r Android/app/src/main/assets/soh.o2r
+
+      - name: Switch to 32-bit (armeabi-v7a)
+        run: |
+          sed -i "s/abiFilters 'arm64-v8a'/abiFilters 'armeabi-v7a'/g" Android/app/build.gradle
+          sed -i 's/"-DBUILD_REMOTE_CONTROL=1"/"-DBUILD_REMOTE_CONTROL=1", "-DANDROID_ARM_NEON=TRUE"/g' Android/app/build.gradle
+          grep -n "abiFilters\|ANDROID_ARM_NEON" Android/app/build.gradle
+
+      - name: Apply patches (if any)
+        run: |
+          shopt -s nullglob
+          for p in patches/main/*.patch; do
+            echo "Applying $p"
+            git apply --verbose "$p"
+          done
+          for sub in libultraship ZAPDTR OTRExporter; do
+            for p in patches/$sub/*.patch; do
+              echo "Applying $p to $sub"
+              (cd "$sub" && git apply --verbose "../$p")
+            done
+          done
+
+      - name: Restore signing key from cache
+        uses: actions/cache@v4
+        with:
+          path: Android/app/release.jks
+          key: armv7-signing-key-v1
+
+      - name: Create signing key if missing
+        run: |
+          if [ ! -f Android/app/release.jks ]; then
+            keytool -genkeypair -keystore Android/app/release.jks -storetype PKCS12 \
+              -storepass sohandroid -keypass sohandroid -alias soh \
+              -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=SOH personal build"
+          fi
+
+      - name: Build release APK
+        env:
+          GIT_TAG: armv7-run${{ github.run_number }}
+        run: |
+          cd Android
+          ./gradlew --no-daemon assembleRelease \
+            -PstoreFile=release.jks -PstorePassword=sohandroid \
+            -PkeyAlias=soh -PkeyPassword=sohandroid
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: soh-armv7-apk
+          path: Android/app/build/outputs/apk/release/*.apk
