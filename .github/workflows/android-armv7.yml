@@ -56,6 +56,11 @@ jobs:
           sed -i 's/storeFile file(storeFile)/storeFile file(project.storeFile)/' Android/app/build.gradle
           grep -n "abiFilters\|ANDROID_ARM_NEON\|storeFile" Android/app/build.gradle
 
+      - name: Fix NEON audio mixer for 32-bit ARM
+        run: |
+          sed -i '/^#include <arm_neon.h>$/a #if !defined(__aarch64__)\n#define vmull_high_n_s16(a, b) vmull_n_s16(vget_high_s16(a), (b))\n#define vmull_high_s16(a, b) vmull_s16(vget_high_s16(a), vget_high_s16(b))\n#endif' soh/soh/mixer.c
+          grep -n -A4 "arm_neon.h" soh/soh/mixer.c
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
