@@ -193,6 +193,32 @@ jobs:
           PY
           sed -n '/case PS_LOCAL: {/,/case PS_FIRST: {/p' soh/soh/OTRGlobals.cpp
 
+      - name: Renderer fix - high precision fragment shaders and GPU info log
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          assert s.count('precision mediump float;') == 1
+          s = s.replace('precision mediump float;', 'precision highp float;')
+          diag = r"""glDepthFunc(GL_LEQUAL);
+              glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+          #ifdef USE_OPENGLES
+              {
+                  GLint mr[2] = { 0, 0 }, mp = 0, hr[2] = { 0, 0 }, hp = 0;
+                  glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_MEDIUM_FLOAT, mr, &mp);
+                  glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, hr, &hp);
+                  SPDLOG_INFO("[diag] GL vendor={} renderer={} version={}", (const char*)glGetString(GL_VENDOR),
+                              (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
+                  SPDLOG_INFO("[diag] fragment precision bits: mediump={} highp={}", mp, hp);
+              }
+          #endif"""
+          s, n = re.subn(r'glDepthFunc\(GL_LEQUAL\);\s*glBlendFunc\(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA\);', lambda m: diag, s, count=1)
+          assert n == 1, n
+          open(p, 'w').write(s)
+          PY
+          grep -n "precision highp\|\[diag\]" libultraship/src/fast/backends/gfx_opengl.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
