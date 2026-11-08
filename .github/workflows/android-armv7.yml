@@ -180,6 +180,19 @@ jobs:
           PY
           sed -n '/protected void onActivityResult/,/STORAGE_PERMISSION_REQUEST_CODE) {/p' Android/app/src/main/java/com/dishii/soh/MainActivity.java | head -60
 
+      - name: Enable ROM auto-detection in the SOH folder (Android)
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'soh/soh/OTRGlobals.cpp'
+          s = open(p).read()
+          s, n1 = re.subn(r'#ifdef __ANDROID__\s*// On Android, skip auto-discovery and use file picker instead\s*promptStep = PS_FIRST;\s*continue;\s*#endif', '', s, count=1)
+          s, n2 = re.subn(r'(extract\.SetSearchPath\(dataPath\);\s*extract\.GetRoms\(args\);)', r'\1\n                        std::sort(args.begin(), args.end());\n                        args.erase(std::unique(args.begin(), args.end()), args.end());', s, count=1)
+          assert n1 == 1 and n2 == 1, (n1, n2)
+          open(p, 'w').write(s)
+          PY
+          sed -n '/case PS_LOCAL: {/,/case PS_FIRST: {/p' soh/soh/OTRGlobals.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
