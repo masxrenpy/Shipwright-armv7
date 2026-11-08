@@ -135,6 +135,51 @@ jobs:
           PY
           grep -n "DiagLog(" soh/soh/Extractor/Extract.cpp | head -30
 
+      - name: Diagnostic - file picker fix and logging (Java)
+        run: |
+          python3 - <<'PY'
+          p = 'Android/app/src/main/java/com/dishii/soh/MainActivity.java'
+          s = open(p).read()
+          def rep(old, new):
+              global s
+              assert s.count(old) == 1, 'anchor not found once: ' + old
+              s = s.replace(old, new)
+          rep('        if (requestCode == FILE_PICKER_REQUEST_CODE && resultCode == RESULT_OK && data != null) {\n',
+              '''        if (requestCode == FILE_PICKER_REQUEST_CODE && (resultCode != RESULT_OK || data == null)) {
+                      diag("picker returned without a file: resultCode=" + resultCode + " data=" + data);
+                      final int rc = resultCode;
+                      runOnUiThread(() -> Toast.makeText(this, "File picker returned no file (resultCode=" + rc + ")", Toast.LENGTH_LONG).show());
+                      nativeHandleSelectedFile(null);
+                  } else if (requestCode == FILE_PICKER_REQUEST_CODE) {
+          ''')
+          rep('            Uri selectedFileUri = data.getData();\n',
+              '            Uri selectedFileUri = data.getData();\n            diag("picker OK, uri=" + selectedFileUri);\n')
+          rep('                } catch (IOException e) {\n                    e.printStackTrace();\n',
+              '''                } catch (Exception e) {
+                              e.printStackTrace();
+                              diag("copy failed: " + e);
+                              final String em = String.valueOf(e);
+                              runOnUiThread(() -> Toast.makeText(this, "Copy failed: " + em, Toast.LENGTH_LONG).show());
+          ''')
+          rep('    public void showAlertDialog(',
+              '''    private void diag(String msg) {
+                  try {
+                      File d = new File(Environment.getExternalStorageDirectory(), "SOH/logs");
+                      d.mkdirs();
+                      try (java.io.FileWriter w = new java.io.FileWriter(new File(d, "java-diag.txt"), true)) {
+                          w.write(msg + "\\n");
+                      }
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              public void showAlertDialog(''')
+          rep('        intent.setType("*/*");\n',
+              '        intent.setType("*/*");\n        intent.addCategory(Intent.CATEGORY_OPENABLE);\n        diag("openFilePicker called");\n')
+          open(p, 'w').write(s)
+          PY
+          sed -n '/protected void onActivityResult/,/STORAGE_PERMISSION_REQUEST_CODE) {/p' Android/app/src/main/java/com/dishii/soh/MainActivity.java | head -60
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
