@@ -219,6 +219,55 @@ jobs:
           PY
           grep -n "precision highp\|\[diag\]" libultraship/src/fast/backends/gfx_opengl.cpp
 
+      - name: Graphics diagnostics - switchable by folders in SOH (Android)
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          def sub(pattern, repl, label):
+              global s
+              s, n = re.subn(pattern, lambda m: repl(m), s, count=1)
+              assert n == 1, 'anchor failed: ' + label
+          helper = '''
+          static bool DiagFlag(const char* name) {
+          #ifdef __ANDROID__
+              std::error_code ec;
+              bool on = std::filesystem::exists(std::string("/storage/emulated/0/SOH/diag_") + name, ec);
+              if (on) {
+                  SPDLOG_ERROR("[diag] flag on: {}", name);
+              }
+              return on;
+          #else
+              return false;
+          #endif
+          }
+          '''
+          sub(r'#include "ship/config/ConsoleVariable.h"\n', lambda m: m.group(0) + '#include <filesystem>\n#include <string>\n#include <system_error>\n' + helper, 'include')
+          sub(r'(\{ "GLSL_VERSION", "#version 300 es" \},\s*\{ "attr", "in" \},\s*\{ "out", "out" \},\s*\{ "opengles", )true( \})', lambda m: m.group(1) + '!DiagFlag("noz")' + m.group(2), 'vertex opengles flag')
+          sub(r'glPolygonOffset\(SSDB, -2\);\s*glEnable\(GL_POLYGON_OFFSET_FILL\);', lambda m: 'static const bool kNoPoly = DiagFlag("nopoly");\n            if (!kNoPoly) {\n                glPolygonOffset(SSDB, -2);\n                glEnable(GL_POLYGON_OFFSET_FILL);\n            }', 'polygon offset')
+          sub(r'if \(mCurrentDepthTest \|\| mLastDepthMask\) \{\s*glEnable\(GL_DEPTH_TEST\);\s*glDepthMask\(mLastDepthMask \? GL_TRUE : GL_FALSE\);\s*glDepthFunc\(mCurrentDepthTest \? \(mCurrentZmodeDecal \? GL_LEQUAL : GL_LESS\) : GL_ALWAYS\);', lambda m: '''static const bool kNoDepth = DiagFlag("nodepth");
+                  static const bool kDepthAlways = DiagFlag("depthalways");
+                  if ((mCurrentDepthTest || mLastDepthMask) && !kNoDepth) {
+                      glEnable(GL_DEPTH_TEST);
+                      glDepthMask(mLastDepthMask ? GL_TRUE : GL_FALSE);
+                      glDepthFunc(kDepthAlways ? GL_ALWAYS : (mCurrentDepthTest ? (mCurrentZmodeDecal ? GL_LEQUAL : GL_LESS) : GL_ALWAYS));''', 'depth')
+          magenta = '''
+              if (DiagFlag("magenta")) {
+                  const std::string from = "discard;";
+                  const std::string to = "{ vOutColor = vec4(1.0, 0.0, 1.0, 1.0); return; }";
+                  size_t pos = 0;
+                  while ((pos = result.find(from, pos)) != std::string::npos) {
+                      result.replace(pos, from.size(), to);
+                      pos += to.size();
+                  }
+              }'''
+          sub(r'(processor\.bind_include_loader\(opengl_include_fs\);\s*auto result = processor\.process\(\);)(\s*// SPDLOG_INFO\("=========== FRAGMENT SHADER)', lambda m: m.group(1) + magenta + m.group(2), 'fragment shader')
+          s = s.replace('SPDLOG_INFO("[diag]', 'SPDLOG_ERROR("[diag]')
+          open(p, 'w').write(s)
+          PY
+          grep -n "DiagFlag" libultraship/src/fast/backends/gfx_opengl.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
