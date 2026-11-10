@@ -268,6 +268,79 @@ jobs:
           PY
           grep -n "DiagFlag" libultraship/src/fast/backends/gfx_opengl.cpp
 
+      - name: Texture diagnostics - log all-transparent textures and forcealpha flag
+        run: |
+          python3 - <<'PY'
+          import re
+          # 1) interpreter.cpp: log textures whose decoded alpha is entirely zero
+          p = 'libultraship/src/fast/interpreter.cpp'
+          s = open(p).read()
+          helper = '''#include <spdlog/fmt/fmt.h>
+          #include <unordered_set>
+
+          static void DiagCheckTexture(const char* fmtName, const uint8_t* rgba, uint32_t width, uint32_t height,
+                                       const std::string& path, uint32_t sizeBytes, const uint8_t* src,
+                                       const uint8_t* pal) {
+          #ifdef __ANDROID__
+              static std::unordered_set<std::string> seen;
+              if (seen.size() >= 80) {
+                  return;
+              }
+              size_t n = (size_t)width * (size_t)height;
+              for (size_t i = 0; i < n; i++) {
+                  if (rgba[4 * i + 3] != 0) {
+                      return;
+                  }
+              }
+              if (!seen.insert(path).second) {
+                  return;
+              }
+              auto hex = [](const uint8_t* p, uint32_t len) {
+                  std::string h;
+                  if (p == nullptr) {
+                      return std::string("null");
+                  }
+                  char b[4];
+                  for (uint32_t k = 0; k < len; k++) {
+                      snprintf(b, sizeof(b), "%02x", p[k]);
+                      h += b;
+                  }
+                  return h;
+              };
+              SPDLOG_ERROR("[diag] all-transparent texture {} {}x{} bytes={} path={} data16={} pal16={}", fmtName, width,
+                           height, sizeBytes, path, hex(src, sizeBytes < 16 ? sizeBytes : 16), hex(pal, 16));
+          #endif
+          }
+          '''
+          assert s.count('#include <spdlog/fmt/fmt.h>\n') == 1
+          s = s.replace('#include <spdlog/fmt/fmt.h>\n', helper, 1)
+          for fn, label, pal in [('Rgba16', 'RGBA16', 'nullptr'), ('Ci4', 'CI4', 'palette'), ('Ci8', 'CI8', 'mRdp->palettes[0]')]:
+              pat = r'(void Interpreter::ImportTexture' + fn + r'\(int tile, bool importReplacement\) \{.*?)(    mRapi->UploadTexture\(mTexUploadBuffer, width, height\);)'
+              new = (r'\1    DiagCheckTexture("' + label + '", mTexUploadBuffer, width, height, metadata->resource ? metadata->resource->GetInitData()->Path : std::string("<no resource>"), sizeBytes, addr, ' + pal + r');' + '\n' + r'\2')
+              s, n = re.subn(pat, new, s, count=1, flags=re.S)
+              assert n == 1, 'texture function not patched: ' + fn
+          open(p, 'w').write(s)
+          # 2) gfx_opengl.cpp: add a forcealpha flag next to the magenta one
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          anchor = '    if (DiagFlag("magenta")) {'
+          assert s.count(anchor) == 1, 'run the previous graphics diagnostics step first'
+          force = '''    if (DiagFlag("forcealpha")) {
+              const std::string from = "discard;";
+              const std::string to = "{ texel.a = 1.0; }";
+              size_t pos = 0;
+              while ((pos = result.find(from, pos)) != std::string::npos) {
+                  result.replace(pos, from.size(), to);
+                  pos += to.size();
+              }
+          }
+          '''
+          s = s.replace(anchor, force + anchor, 1)
+          open(p, 'w').write(s)
+          PY
+          grep -n "DiagCheckTexture" libultraship/src/fast/interpreter.cpp
+          grep -n "forcealpha" libultraship/src/fast/backends/gfx_opengl.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
