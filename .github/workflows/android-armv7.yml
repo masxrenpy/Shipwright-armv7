@@ -341,6 +341,61 @@ jobs:
           grep -n "DiagCheckTexture" libultraship/src/fast/interpreter.cpp
           grep -n "forcealpha" libultraship/src/fast/backends/gfx_opengl.cpp
 
+      - name: Diagnostics v3 - reliable log file and alpha source view
+        run: |
+          python3 - <<'PY'
+          import re
+          log_helper = '''
+          #include <sys/stat.h>
+          static void DiagFileLog(const std::string& s) {
+          #ifdef __ANDROID__
+              mkdir("/storage/emulated/0/SOH/logs", 0777);
+              FILE* f = fopen("/storage/emulated/0/SOH/logs/gfx-diag.txt", "a");
+              if (f) {
+                  fputs(s.c_str(), f);
+                  fputc('\\n', f);
+                  fclose(f);
+              }
+          #endif
+          }
+          #define DIAG_LOG(...) DiagFileLog(fmt::format(__VA_ARGS__))
+          '''
+          # --- gfx_opengl.cpp ---
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          assert s.count('static bool DiagFlag(const char* name) {') == 1, 'run the previous diagnostics steps first'
+          s = s.replace('static bool DiagFlag(const char* name) {', '#include <cstdio>\n#include <spdlog/fmt/fmt.h>\n' + log_helper + '\nstatic bool DiagFlag(const char* name) {', 1)
+          s = s.replace('SPDLOG_ERROR("[diag]', 'DIAG_LOG("[diag]')
+          def block(flag, chans):
+              lines = ['    if (DiagFlag("%s")) {' % flag,
+                       '        std::string dbg = "vec4 dbg = vec4(0.5, 0.5, 0.5, 1.0);";']
+              for ch, decl, expr in chans:
+                  lines.append('        if (result.find("%s") != std::string::npos) dbg += " dbg.%s = %s;";' % (decl, ch, expr))
+              lines += ['        const std::string from = "discard;";',
+                        '        const std::string to = "{ " + dbg + " vOutColor = dbg; return; }";',
+                        '        size_t pos = 0;',
+                        '        while ((pos = result.find(from, pos)) != std::string::npos) {',
+                        '            result.replace(pos, from.size(), to);',
+                        '            pos += to.size();',
+                        '        }',
+                        '    }', '']
+              return '\n'.join(lines)
+          blocks = block('alphasrc', [('r', 'vec4 vInput1;', 'vInput1.a'), ('g', 'vec4 vInput2;', 'vInput2.a'), ('b', 'vec4 texVal0 =', 'texVal0.a')])
+          blocks += block('alphasrc2', [('r', 'vec4 vInput3;', 'vInput3.a'), ('g', 'vec4 vInput4;', 'vInput4.a'), ('b', 'vec4 texVal1 =', 'texVal1.a')])
+          anchor = '    if (DiagFlag("forcealpha")) {'
+          assert s.count(anchor) == 1, 'forcealpha step missing'
+          s = s.replace(anchor, blocks + anchor, 1)
+          open(p, 'w').write(s)
+          # --- interpreter.cpp ---
+          p = 'libultraship/src/fast/interpreter.cpp'
+          s = open(p).read()
+          assert s.count('static void DiagCheckTexture(') == 1, 'texture diagnostics step missing'
+          s = s.replace('static void DiagCheckTexture(', '#include <cstdio>\n' + log_helper + '\nstatic void DiagCheckTexture(', 1)
+          s = s.replace('SPDLOG_ERROR("[diag]', 'DIAG_LOG("[diag]')
+          open(p, 'w').write(s)
+          PY
+          grep -n "DIAG_LOG\|SPDLOG_ERROR(\"\[diag" libultraship/src/fast/backends/gfx_opengl.cpp libultraship/src/fast/interpreter.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
