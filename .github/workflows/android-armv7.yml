@@ -442,6 +442,48 @@ jobs:
           PY
           grep -n "DiagAlphaDraw" libultraship/src/fast/interpreter.cpp
 
+      - name: Diagnostics v5 - edge alpha test workarounds and final alpha view
+        run: |
+          python3 - <<'PY'
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          anchor = '    if (DiagFlag("alphasrc")) {'
+          assert s.count(anchor) == 1, 'run diagnostics v3 first'
+          new = '''    {
+              const std::string kEdge = "if (texel.a > 0.19) texel.a = 1.0; else discard;";
+              size_t epos = result.find(kEdge);
+              if (DiagFlag("edgefix")) {
+                  if (epos != std::string::npos) {
+                      result.replace(epos, kEdge.size(), "if (!(texel.a > 0.19)) discard; texel.a = 1.0;");
+                  } else {
+                      DIAG_LOG("[diag] edgefix: pattern not found");
+                  }
+              } else if (DiagFlag("edgefix2")) {
+                  if (epos != std::string::npos) {
+                      result.replace(epos, kEdge.size(), "texel.a = (texel.a > 0.19) ? 1.0 : 0.0; if (texel.a < 0.5) discard;");
+                  } else {
+                      DIAG_LOG("[diag] edgefix2: pattern not found");
+                  }
+              }
+          }
+              if (DiagFlag("texela")) {
+                  std::string dbg = "vec4 dbg = vec4(texel.a, 0.5, 0.5, 1.0);";
+                  if (result.find("vec4 texVal0 =") != std::string::npos) dbg += " dbg.g = texVal0.a;";
+                  if (result.find("vec4 vFog;") != std::string::npos) dbg += " dbg.b = vFog.a;";
+                  const std::string from = "discard;";
+                  const std::string to = "{ " + dbg + " vOutColor = dbg; return; }";
+                  size_t pos = 0;
+                  while ((pos = result.find(from, pos)) != std::string::npos) {
+                      result.replace(pos, from.size(), to);
+                      pos += to.size();
+                  }
+              }
+          '''
+          s = s.replace(anchor, new + anchor, 1)
+          open(p, 'w').write(s)
+          PY
+          grep -n 'DiagFlag("edgefix\|DiagFlag("texela' libultraship/src/fast/backends/gfx_opengl.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
