@@ -396,6 +396,52 @@ jobs:
           PY
           grep -n "DIAG_LOG\|SPDLOG_ERROR(\"\[diag" libultraship/src/fast/backends/gfx_opengl.cpp libultraship/src/fast/interpreter.cpp
 
+      - name: Diagnostics v4 - log combiner state of alpha-tested draws
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'libultraship/src/fast/interpreter.cpp'
+          s = open(p).read()
+          assert s.count('static void DiagCheckTexture(') == 1 and s.count('#define DIAG_LOG(') == 1, 'run diagnostics v3 first'
+          helper = '''#include <set>
+          #include <tuple>
+          static void DiagAlphaDraw(uint64_t comb, uint32_t geom, uint32_t oml, uint32_t omh, bool fog, bool noise, bool thr,
+                                    bool edge, int nin, const uint8_t* map0, const uint8_t* map1, int a0, int a1, int a2,
+                                    int pr, int pg, int pb, int pa, int er, int eg, int eb, int ea, int fogmul,
+                                    int fogoff, float z0, float w0) {
+          #ifdef __ANDROID__
+              static std::set<std::tuple<uint64_t, uint32_t, uint32_t>> seen;
+              if (seen.size() >= 60 || !seen.insert(std::make_tuple(comb, geom, oml)).second) {
+                  return;
+              }
+              DIAG_LOG("[diag] alpha-draw comb=0x{:x} geom=0x{:x} oml=0x{:x} omh=0x{:x} fog={} noise={} thr={} edge={} nin={} "
+                       "map0={},{},{},{} map1={},{},{},{} vtxA={},{},{} prim={},{},{},{} env={},{},{},{} fogmul={} fogoff={} "
+                       "z0={:.3f} w0={:.3f}",
+                       comb, geom, oml, omh, fog, noise, thr, edge, nin, (int)map0[0], (int)map0[1], (int)map0[2], (int)map0[3],
+                       (int)map1[0], (int)map1[1], (int)map1[2], (int)map1[3], a0, a1, a2, pr, pg, pb, pa, er, eg, eb, ea,
+                       fogmul, fogoff, z0, w0);
+          #endif
+          }
+
+          '''
+          s = s.replace('static void DiagCheckTexture(', helper + 'static void DiagCheckTexture(', 1)
+          pat = r'(mRapi->ShaderGetInfo\(prg, &numInputs, usedTextures\);)(\s*struct GfxClipParameters clip_parameters = mRapi->GetClipParameters\(\);\s*for \(int i = 0; i < 3; i\+\+\) \{\s*float z = v_arr\[i\]->z, w = v_arr\[i\]->w;)'
+          call = r'''\1
+              if (use_alpha && (texture_edge || alpha_threshold)) {
+                  DiagAlphaDraw(mRdp->combine_mode, mRsp->geometry_mode, mRdp->other_mode_l, mRdp->other_mode_h, use_fog,
+                                use_noise, alpha_threshold, texture_edge, (int)numInputs, comb->shader_input_mapping[0],
+                                comb->shader_input_mapping[1], (int)v_arr[0]->color.a, (int)v_arr[1]->color.a,
+                                (int)v_arr[2]->color.a, (int)mRdp->prim_color.r, (int)mRdp->prim_color.g,
+                                (int)mRdp->prim_color.b, (int)mRdp->prim_color.a, (int)mRdp->env_color.r,
+                                (int)mRdp->env_color.g, (int)mRdp->env_color.b, (int)mRdp->env_color.a, (int)mRsp->fog_mul,
+                                (int)mRsp->fog_offset, v_arr[0]->z, v_arr[0]->w);
+              }\2'''
+          s, n = re.subn(pat, call, s, count=1)
+          assert n == 1, 'draw anchor not found'
+          open(p, 'w').write(s)
+          PY
+          grep -n "DiagAlphaDraw" libultraship/src/fast/interpreter.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
