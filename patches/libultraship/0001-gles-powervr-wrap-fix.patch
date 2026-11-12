@@ -1,0 +1,103 @@
+diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
+index c0746d3..0d700b1 100644
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -26,6 +26,56 @@
+ #include "ship/resource/factory/ShaderFactory.h"
+ #include "fast/interpreter.h"
+ #include "ship/config/ConsoleVariable.h"
++#include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <string>
++#include <system_error>
++#include <sys/stat.h>
++#include <spdlog/fmt/fmt.h>
++
++// --- Android / OpenGL ES helpers (armv7 beta) ---
++static void GfxFileLog(const std::string& s) {
++#ifdef __ANDROID__
++    mkdir("/storage/emulated/0/SOH/logs", 0777);
++    FILE* f = fopen("/storage/emulated/0/SOH/logs/gfx-diag.txt", "a");
++    if (f) {
++        fputs(s.c_str(), f);
++        fputc('\n', f);
++        fclose(f);
++    }
++#endif
++}
++#define GFX_LOG(...) GfxFileLog(fmt::format(__VA_ARGS__))
++
++static bool GfxFolderFlag(const char* name) {
++#ifdef __ANDROID__
++    std::error_code ec;
++    return std::filesystem::exists(std::string("/storage/emulated/0/SOH/") + name, ec);
++#else
++    return false;
++#endif
++}
++
++// PowerVR Rogue GPUs (for example the GE8320) drop the alpha computed through the combiner WRAP() macro (mod), which
++// makes parts of models disappear. On those GPUs WRAP() is replaced by an identity. Folder overrides inside SOH:
++// "gfx_nowrap" forces the identity on any GPU, "gfx_wrap" forces the original behaviour.
++static bool GfxUseIdentityWrap() {
++#ifdef USE_OPENGLES
++    static int cached = -1;
++    if (cached < 0) {
++        const char* renderer = (const char*)glGetString(GL_RENDERER);
++        bool powervr = renderer != nullptr && strstr(renderer, "PowerVR") != nullptr;
++        bool force = GfxFolderFlag("gfx_nowrap");
++        bool forbid = GfxFolderFlag("gfx_wrap");
++        cached = (force || (powervr && !forbid)) ? 1 : 0;
++        GFX_LOG("[gfx] renderer={} identity_wrap={}", renderer != nullptr ? renderer : "?", cached);
++    }
++    return cached == 1;
++#else
++    return false;
++#endif
++}
+ 
+ namespace Fast {
+ int GfxRenderingAPIOGL::GetMaxTextureSize() {
+@@ -284,7 +334,7 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
+         { "texture", "texture" },
+         { "vOutColor", "vOutColor" },
+ #elif defined(USE_OPENGLES)
+-        { "GLSL_VERSION", "#version 300 es\nprecision mediump float;" },
++        { "GLSL_VERSION", "#version 300 es\nprecision highp float;" },
+         { "attr", "in" },
+         { "opengles", true },
+         { "core_opengl", false },
+@@ -316,6 +366,15 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
+     processor.load(*shader);
+     processor.bind_include_loader(opengl_include_fs);
+     auto result = processor.process();
++    if (GfxUseIdentityWrap()) {
++        const std::string wrapMacro = "#define WRAP(x, low, high) mod((x)-(low), (high)-(low)) + (low)";
++        size_t wpos = result.find(wrapMacro);
++        if (wpos != std::string::npos) {
++            result.replace(wpos, wrapMacro.size(), "#define WRAP(x, low, high) (x)");
++        } else {
++            GFX_LOG("[gfx] WRAP macro not found in fragment shader");
++        }
++    }
+     // SPDLOG_INFO("=========== FRAGMENT SHADER ============");
+     // SPDLOG_INFO(result);
+     // SPDLOG_INFO("========================================");
+@@ -691,6 +750,16 @@ void GfxRenderingAPIOGL::Init() {
+ #endif
+     glDepthFunc(GL_LEQUAL);
+     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++#ifdef USE_OPENGLES
++    {
++        GLint mr[2] = { 0, 0 }, mp = 0, hr[2] = { 0, 0 }, hp = 0;
++        glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_MEDIUM_FLOAT, mr, &mp);
++        glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, hr, &hp);
++        GFX_LOG("[gfx] GL vendor={} renderer={} version={}", (const char*)glGetString(GL_VENDOR),
++                (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
++        GFX_LOG("[gfx] fragment precision bits: mediump={} highp={}", mp, hp);
++    }
++#endif
+ 
+     mFrameBuffers.resize(1); // for the default screen buffer
+ 
