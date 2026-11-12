@@ -484,6 +484,51 @@ jobs:
           PY
           grep -n 'DiagFlag("edgefix\|DiagFlag("texela' libultraship/src/fast/backends/gfx_opengl.cpp
 
+      - name: Diagnostics v6 - alpha trace through the shader and nowrap test
+        run: |
+          python3 - <<'PY'
+          p = 'libultraship/src/fast/backends/gfx_opengl.cpp'
+          s = open(p).read()
+          anchor = '    if (DiagFlag("alphasrc")) {'
+          assert s.count(anchor) == 1, 'run diagnostics v3 and v5 first'
+          new = '''    if (DiagFlag("nowrap")) {
+                  const std::string macro = "#define WRAP(x, low, high) mod((x)-(low), (high)-(low)) + (low)";
+                  size_t mpos = result.find(macro);
+                  if (mpos != std::string::npos) {
+                      result.replace(mpos, macro.size(), "#define WRAP(x, low, high) (x)");
+                  } else {
+                      DIAG_LOG("[diag] nowrap: macro not found");
+                  }
+              }
+              if (DiagFlag("alphatrace")) {
+                  auto insertBefore = [&result](const std::string& marker, const std::string& code) {
+                      size_t p = result.find(marker);
+                      if (p != std::string::npos) {
+                          result.insert(p, code);
+                      }
+                  };
+                  insertBefore("vec4 texel;", "float dbg1 = 0.5, dbg2 = 0.5, dbg3 = 0.5; ");
+                  insertBefore("texel.a = WRAP(texel.a, -", "dbg1 = texel.a; ");
+                  insertBefore("texel = WRAP(texel, -0.51, 1.51);", "dbg2 = texel.a; ");
+                  if (result.find("if (texel.a > 0.19)") != std::string::npos) {
+                      insertBefore("if (texel.a > 0.19)", "dbg3 = texel.a; ");
+                  } else {
+                      insertBefore("if (texel.a < 8.0 / 256.0)", "dbg3 = texel.a; ");
+                  }
+                  const std::string from = "discard;";
+                  const std::string to = "{ vOutColor = vec4(dbg1, dbg2, dbg3, 1.0); return; }";
+                  size_t pos = 0;
+                  while ((pos = result.find(from, pos)) != std::string::npos) {
+                      result.replace(pos, from.size(), to);
+                      pos += to.size();
+                  }
+              }
+          '''
+          s = s.replace(anchor, new + anchor, 1)
+          open(p, 'w').write(s)
+          PY
+          grep -n 'DiagFlag("nowrap\|DiagFlag("alphatrace' libultraship/src/fast/backends/gfx_opengl.cpp
+
       - name: Apply patches (if any)
         run: |
           shopt -s nullglob
