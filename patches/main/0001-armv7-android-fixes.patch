@@ -1,0 +1,238 @@
+diff --git a/Android/app/build.gradle b/Android/app/build.gradle
+index 63fd8ba..da10734 100644
+--- a/Android/app/build.gradle
++++ b/Android/app/build.gradle
+@@ -26,7 +26,7 @@ android {
+     signingConfigs {
+         release {
+             if (project.hasProperty('storeFile')) {
+-                storeFile file(storeFile)
++                storeFile file(project.storeFile)
+                 storePassword project.storePassword
+                 keyAlias project.keyAlias
+                 keyPassword project.keyPassword
+@@ -37,8 +37,8 @@ android {
+         debug {
+             externalNativeBuild {
+                 cmake {
+-                    arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON', "-DBUILD_REMOTE_CONTROL=1"
+-                    abiFilters 'arm64-v8a'
++                    arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON', "-DBUILD_REMOTE_CONTROL=1", "-DANDROID_ARM_NEON=TRUE"
++                    abiFilters 'armeabi-v7a'
+                 }
+             }
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+@@ -50,8 +50,8 @@ android {
+             signingConfig signingConfigs.release
+             externalNativeBuild {
+                 cmake {
+-                    arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON', "-DBUILD_REMOTE_CONTROL=1"
+-                    abiFilters 'arm64-v8a'
++                    arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON', "-DBUILD_REMOTE_CONTROL=1", "-DANDROID_ARM_NEON=TRUE"
++                    abiFilters 'armeabi-v7a'
+                 }
+             }
+             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+index 4f7a6c9..2190da8 100644
+--- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
++++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+@@ -339,9 +339,15 @@ public class MainActivity extends SDLActivity{
+     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+         super.onActivityResult(requestCode, resultCode, data);
+ 
+-        if (requestCode == FILE_PICKER_REQUEST_CODE && resultCode == RESULT_OK && data != null) {
++        if (requestCode == FILE_PICKER_REQUEST_CODE && (resultCode != RESULT_OK || data == null)) {
++            diag("picker returned without a file: resultCode=" + resultCode + " data=" + data);
++            final int rc = resultCode;
++            runOnUiThread(() -> Toast.makeText(this, "File picker returned no file (resultCode=" + rc + ")", Toast.LENGTH_LONG).show());
++            nativeHandleSelectedFile(null);
++        } else if (requestCode == FILE_PICKER_REQUEST_CODE) {
+             // Handle file selection
+             Uri selectedFileUri = data.getData();
++            diag("picker OK, uri=" + selectedFileUri);
+             String fileName = "OOT.z64";
+ 
+             File destinationDirectory = new File(Environment.getExternalStorageDirectory(), "SOH");
+@@ -356,8 +362,11 @@ public class MainActivity extends SDLActivity{
+                     while ((bytesRead = in.read(buffer)) != -1) {
+                         out.write(buffer, 0, bytesRead);
+                     }
+-                } catch (IOException e) {
++                } catch (Exception e) {
+                     e.printStackTrace();
++                    diag("copy failed: " + e);
++                    final String em = String.valueOf(e);
++                    runOnUiThread(() -> Toast.makeText(this, "Copy failed: " + em, Toast.LENGTH_LONG).show());
+                 }
+             }
+ 
+@@ -380,6 +389,17 @@ public class MainActivity extends SDLActivity{
+         }
+     }
+ 
++    private void diag(String msg) {
++        try {
++            File d = new File(Environment.getExternalStorageDirectory(), "SOH/logs");
++            d.mkdirs();
++            try (java.io.FileWriter w = new java.io.FileWriter(new File(d, "java-diag.txt"), true)) {
++                w.write(msg + "\n");
++            }
++        } catch (Exception ignored) {
++        }
++    }
++
+     public void showAlertDialog(String title, String message, String btn1, String btn2) {
+         runOnUiThread(() -> {
+             AlertDialog.Builder builder = new AlertDialog.Builder(this)
+@@ -402,6 +422,8 @@ public class MainActivity extends SDLActivity{
+     public void openFilePicker() {
+         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+         intent.setType("*/*");
++        intent.addCategory(Intent.CATEGORY_OPENABLE);
++        diag("openFilePicker called");
+         runOnUiThread(() -> startActivityForResult(intent, 0));
+     }
+ 
+diff --git a/soh/soh/Extractor/Extract.cpp b/soh/soh/Extractor/Extract.cpp
+index 3f23749..9690168 100644
+--- a/soh/soh/Extractor/Extract.cpp
++++ b/soh/soh/Extractor/Extract.cpp
+@@ -9,6 +9,24 @@
+ #include <ship/utils/binarytools/BitConverter.h>
+ #include "soh/ShipUtils.h"
+ #include "variables.h"
++#include <cstdio>
++#include <filesystem>
++#include <string>
++#ifdef __ANDROID__
++#include <fcntl.h>
++#include <unistd.h>
++static void DiagLog(const std::string& msg) {
++    std::error_code ec;
++    std::filesystem::create_directories("/storage/emulated/0/SOH/logs", ec);
++    FILE* f = fopen("/storage/emulated/0/SOH/logs/extract-diag.txt", "a");
++    if (f) {
++        fprintf(f, "%s\n", msg.c_str());
++        fclose(f);
++    }
++}
++#else
++static void DiagLog(const std::string&) {}
++#endif
+ 
+ #ifdef unix
+ #include <dirent.h>
+@@ -132,6 +150,7 @@ extern "C" void JNICALL Java_com_dishii_soh_MainActivity_nativeHandleSelectedFil
+     }
+     const char* filePathStr = env->GetStringUTFChars(filePath, 0);
+     javaRomPath = strdup(filePathStr);
++    DiagLog(std::string("[0] picker returned: ") + filePathStr);
+     fileDialogOpen = false;
+     env->ReleaseStringUTFChars(filePath, filePathStr);
+ }
+@@ -699,6 +718,8 @@ static void MessageboxWorker();
+ 
+ bool Extractor::CallZapd(std::string installPath, std::string exportdir, std::atomic<size_t>* extractCount,
+                          std::atomic<size_t>* totalExtract) {
++    DiagLog("[1] CallZapd entered");
++    try {
+     constexpr int argc = 22;
+     char xmlPath[1024];
+     char confPath[1024];
+@@ -710,8 +731,10 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir, std::at
+     std::string romPath = std::filesystem::absolute(mCurrentRomPath).string();
+     installPath = std::filesystem::absolute(installPath).string();
+     exportdir = std::filesystem::absolute(exportdir).string();
++    DiagLog("[2] rom=" + romPath + " install=" + installPath + " export=" + exportdir);
+     // Work this out in the temporary folder
+     std::string tempdir = Mkdtemp();
++    DiagLog("[3] tempdir=" + tempdir);
+     std::string curdir = std::filesystem::current_path().string();
+ #if defined(_WIN32) || defined(__ANDROID__)
+     std::filesystem::copy(installPath + "/assets", tempdir + "/assets",
+@@ -720,6 +743,7 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir, std::at
+     std::filesystem::create_symlink(installPath + "/assets", tempdir + "/assets");
+ #endif
+ 
++    DiagLog("[4] assets copied");
+     std::filesystem::current_path(tempdir);
+ 
+ #ifdef __ANDROID__
+@@ -758,15 +782,37 @@ bool Extractor::CallZapd(std::string installPath, std::string exportdir, std::at
+     argv[20] = "-osf";
+     argv[21] = "placeholder";
+ 
++#ifdef __ANDROID__
++    {
++        int zfd = open("/storage/emulated/0/SOH/logs/zapd.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
++        if (zfd >= 0) {
++            dup2(zfd, 1);
++            dup2(zfd, 2);
++            setvbuf(stdout, nullptr, _IONBF, 0);
++            setvbuf(stderr, nullptr, _IONBF, 0);
++        }
++    }
++#endif
++    DiagLog("[5] calling zapd_report");
+     zapd_report(argc, (char**)argv.data(), extractCount, totalExtract);
++    DiagLog("[6] zapd_report returned");
+ 
++    DiagLog("[7] copying o2r to export dir");
+     std::filesystem::copy(otrFile, exportdir + "/" + otrFile, std::filesystem::copy_options::overwrite_existing);
+ 
+     // Go back to where this game was executed from
+     std::filesystem::current_path(curdir);
+     std::filesystem::remove_all(tempdir);
+ 
++    DiagLog("[8] CallZapd done");
+     return false;
++    } catch (const std::exception& e) {
++        DiagLog(std::string("EXCEPTION: ") + e.what());
++        throw;
++    } catch (...) {
++        DiagLog("UNKNOWN EXCEPTION");
++        throw;
++    }
+ }
+ 
+ static void MessageboxWorker() {
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 368da1f..f374686 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -660,16 +660,14 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                         continue;
+                     }
+                     case PS_LOCAL: {
+-#ifdef __ANDROID__
+-                        // On Android, skip auto-discovery and use file picker instead
+-                        promptStep = PS_FIRST;
+-                        continue;
+-#endif
++
+                         extract = Extractor();
+                         extract.SetSearchPath(installPath);
+                         extract.GetRoms(args);
+                         extract.SetSearchPath(dataPath);
+                         extract.GetRoms(args);
++                        std::sort(args.begin(), args.end());
++                        args.erase(std::unique(args.begin(), args.end()), args.end());
+                         if (!args.empty()) {
+                             promptStep = PS_WAIT;
+                             SohGui::RegisterPopup(
+diff --git a/soh/soh/mixer.c b/soh/soh/mixer.c
+index 508ae40..ca78d8b 100644
+--- a/soh/soh/mixer.c
++++ b/soh/soh/mixer.c
+@@ -688,6 +688,10 @@ static void aMixImplSSE2(uint16_t count, int16_t gain, uint16_t in_addr, uint16_
+ #endif
+ #if defined(__ARM_NEON)
+ #include <arm_neon.h>
++#if !defined(__aarch64__)
++#define vmull_high_n_s16(a, b) vmull_n_s16(vget_high_s16(a), (b))
++#define vmull_high_s16(a, b) vmull_s16(vget_high_s16(a), vget_high_s16(b))
++#endif
+ static const int32_t x4000Arr[4] = { 0x4000, 0x4000, 0x4000, 0x4000 };
+ void aMixImplNEON(uint16_t count, int16_t gain, uint16_t in_addr, uint16_t out_addr) {
+     int nbytes = ROUND_UP_32(ROUND_DOWN_16(count << 4));
