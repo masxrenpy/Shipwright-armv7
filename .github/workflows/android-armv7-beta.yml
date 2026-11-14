@@ -158,6 +158,14 @@ jobs:
           name: armv7-apk
           path: dist/*
 
+      - name: Upload native symbols (for crash analysis)
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-symbols
+          path: Android/app/.cxx/RelWithDebInfo/*/armeabi-v7a/libsoh.so
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Attach APK to the GitHub release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
