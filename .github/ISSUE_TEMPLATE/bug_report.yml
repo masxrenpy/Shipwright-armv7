@@ -1,0 +1,49 @@
+name: Bug report / Reporte de error
+description: Something does not work in the armv7 beta / Algo no funciona en la beta armv7
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! / ¡Gracias por probar!
+        Please **do not** ask for or share ROMs or game files. / **No** pidas ni compartas ROMs ni archivos del juego.
+  - type: input
+    id: version
+    attributes:
+      label: App version / Versión de la app
+      placeholder: "v9.2.3-armv7-beta.2"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone model and Android version / Modelo de teléfono y versión de Android
+      placeholder: "Redmi 9A, Android 10"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU (if you know it; it is in SOH/logs/gfx-diag.txt) / GPU (si la sabes; está en SOH/logs/gfx-diag.txt)
+      placeholder: "PowerVR Rogue GE8320"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened? / ¿Qué pasó?
+      description: Steps to reproduce, what you expected and what you saw. / Pasos para reproducirlo, lo que esperabas y lo que viste.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Registros
+      description: |
+        Attach the files that exist in SOH/logs/ (drag them here) / Adjunta los archivos que existan en SOH/logs/ (arrástralos aquí):
+        device-info.txt, exit-reasons.txt, java-crash.txt, native-crash.txt, gfx-diag.txt, extract-diag.txt, java-diag.txt, zapd.txt and the latest .log
+  - type: checkboxes
+    id: own-rom
+    attributes:
+      label: Confirmation / Confirmación
+      options:
+        - label: I use my own legally obtained ROM. / Uso mi propia ROM obtenida legalmente.
+          required: true
