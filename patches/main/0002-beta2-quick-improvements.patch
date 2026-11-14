@@ -1,0 +1,324 @@
+diff --git a/Android/app/build.gradle b/Android/app/build.gradle
+index da10734..f0a4e00 100644
+--- a/Android/app/build.gradle
++++ b/Android/app/build.gradle
+@@ -20,8 +20,8 @@ android {
+         }
+         minSdkVersion 24
+         targetSdkVersion 33
+-        versionCode 10
+-        versionName "9.2.3"
++        versionCode 11
++        versionName "9.2.3-armv7-beta.2"
+     }
+     signingConfigs {
+         release {
+diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+index 2190da8..18bab46 100644
+--- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
++++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+@@ -62,6 +62,7 @@ public class MainActivity extends SDLActivity{
+         Log.i("SoH", "onCreate start");
+ 
+         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
++        installCrashLogging();
+ 
+         preferences = getSharedPreferences("com.dishii.soh.prefs", Context.MODE_PRIVATE);
+ 
+@@ -89,34 +90,131 @@ public class MainActivity extends SDLActivity{
+         }
+     }
+ 
+-    private void doVersionCheck(){
++    // Bump this only when a new build needs oot.o2r to be extracted again from the ROM.
++    private static final int ASSET_FORMAT_VERSION = 1;
++
++    private void doVersionCheck() {
++        trimLogs();
++        writeDeviceInfo();
++        logLastExitReasons();
++
+         int currentVersion = BuildConfig.VERSION_CODE;
+-        int storedVersion = preferences.getInt("appVersion", currentVersion);
++        int storedVersion = preferences.getInt("appVersion", -1);
++        int storedFormat = preferences.getInt("assetFormatVersion", ASSET_FORMAT_VERSION);
++
++        if (storedVersion != currentVersion) {
++            // New build: refresh what ships inside the APK (cheap, it is copied again below).
++            deleteBundledAssets();
++            if (storedFormat != ASSET_FORMAT_VERSION) {
++                // The extracted game files are incompatible: the user has to extract the ROM again.
++                deleteExtractedRoms();
++            }
++            preferences.edit()
++                    .putInt("appVersion", currentVersion)
++                    .putInt("assetFormatVersion", ASSET_FORMAT_VERSION)
++                    .apply();
++        }
++    }
++
++    private File getLogsDir() {
++        File dir = new File(new File(Environment.getExternalStorageDirectory(), "SOH"), "logs");
++        dir.mkdirs();
++        return dir;
++    }
++
++    private void writeLogFile(String name, String text, boolean append) {
++        try (java.io.FileWriter w = new java.io.FileWriter(new File(getLogsDir(), name), append)) {
++            w.write(text);
++        } catch (Exception ignored) {
++        }
++    }
+ 
+-        if (currentVersion > storedVersion) {
+-            deleteOutdatedAssets();
+-            preferences.edit().putInt("appVersion", currentVersion).apply();
++    // Keeps the diagnostic files small: anything above 1 MB is removed at startup.
++    private void trimLogs() {
++        String[] names = { "java-diag.txt", "extract-diag.txt", "gfx-diag.txt", "zapd.txt", "java-crash.txt",
++                "native-crash.txt" };
++        for (String name : names) {
++            File f = new File(getLogsDir(), name);
++            if (f.exists() && f.length() > 1024 * 1024) {
++                f.delete();
++            }
+         }
+     }
+ 
+-    private void deleteOutdatedAssets() {
++    // One small file with the information needed to understand a bug report.
++    private void writeDeviceInfo() {
++        StringBuilder sb = new StringBuilder();
++        sb.append("app=").append(BuildConfig.VERSION_NAME).append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
++        sb.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
++        sb.append("android=").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
++        sb.append("abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS)).append('\n');
++        try {
++            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
++            android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
++            am.getMemoryInfo(mi);
++            sb.append("ram_mb=").append(mi.totalMem / (1024 * 1024)).append('\n');
++        } catch (Exception ignored) {
++        }
++        File root = new File(Environment.getExternalStorageDirectory(), "SOH");
++        sb.append("free_storage_mb=").append(root.getUsableSpace() / (1024 * 1024)).append('\n');
++        sb.append("started=").append(new java.util.Date()).append('\n');
++        writeLogFile("device-info.txt", sb.toString(), false);
++    }
++
++    // Android 11+ remembers why the previous process ended (crash, low memory kill, ...).
++    private void logLastExitReasons() {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
++            return;
++        }
++        try {
++            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
++            java.util.List<android.app.ApplicationExitInfo> list = am.getHistoricalProcessExitReasons(null, 0, 5);
++            StringBuilder sb = new StringBuilder();
++            for (android.app.ApplicationExitInfo info : list) {
++                sb.append(new java.util.Date(info.getTimestamp())).append(" reason=").append(info.getReason())
++                        .append(" status=").append(info.getStatus()).append(" importance=").append(info.getImportance())
++                        .append(" rss_kb=").append(info.getRss()).append(" desc=").append(info.getDescription())
++                        .append('\n');
++            }
++            writeLogFile("exit-reasons.txt", sb.toString(), false);
++        } catch (Exception ignored) {
++        }
++    }
++
++    // Java crashes are written to SOH/logs/java-crash.txt, then handled as usual.
++    private void installCrashLogging() {
++        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
++        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
++            try {
++                java.io.StringWriter sw = new java.io.StringWriter();
++                throwable.printStackTrace(new java.io.PrintWriter(sw));
++                writeLogFile("java-crash.txt",
++                        "---- " + new java.util.Date() + " thread=" + thread.getName() + "\n" + sw + "\n", true);
++            } catch (Throwable ignored) {
++            }
++            if (previous != null) {
++                previous.uncaughtException(thread, throwable);
++            }
++        });
++    }
++
++    // Files that come from the APK (or are cheap to regenerate): removed on every new build.
++    private void deleteBundledAssets() {
+         File targetRootFolder = new File(Environment.getExternalStorageDirectory(), "SOH");
+ 
+-        File sohFile = new File(targetRootFolder, "soh.otr");
+-        File ootFile = new File(targetRootFolder, "oot.otr");
+-        File ootMqFile = new File(targetRootFolder, "oot-mq.otr");
+-        File sohO2rFile = new File(targetRootFolder, "soh.o2r");
+-        File ootO2rFile = new File(targetRootFolder, "oot.o2r");
+-        File ootMqO2rFile = new File(targetRootFolder, "oot-mq.o2r");
+-        File assetsFolder = new File(targetRootFolder, "assets");
++        deleteIfExists(new File(targetRootFolder, "soh.otr"));
++        deleteIfExists(new File(targetRootFolder, "oot.otr"));
++        deleteIfExists(new File(targetRootFolder, "oot-mq.otr"));
++        deleteIfExists(new File(targetRootFolder, "soh.o2r"));
++        deleteRecursiveIfExists(new File(targetRootFolder, "assets"));
++    }
++
++    // Files extracted from the user's ROM (slow to regenerate): removed only when the format changes.
++    private void deleteExtractedRoms() {
++        File targetRootFolder = new File(Environment.getExternalStorageDirectory(), "SOH");
+ 
+-        deleteIfExists(sohFile);
+-        deleteIfExists(ootFile);
+-        deleteIfExists(ootMqFile);
+-        deleteIfExists(sohO2rFile);
+-        deleteIfExists(ootO2rFile);
+-        deleteIfExists(ootMqO2rFile);
+-        deleteRecursiveIfExists(assetsFolder);
++        deleteIfExists(new File(targetRootFolder, "oot.o2r"));
++        deleteIfExists(new File(targetRootFolder, "oot-mq.o2r"));
+     }
+ 
+     private void deleteIfExists(File file) {
+diff --git a/soh/soh/Enhancements/Fixes/DirtPathFix.cpp b/soh/soh/Enhancements/Fixes/DirtPathFix.cpp
+index ae49f45..77fd7ea 100644
+--- a/soh/soh/Enhancements/Fixes/DirtPathFix.cpp
++++ b/soh/soh/Enhancements/Fixes/DirtPathFix.cpp
+@@ -4,7 +4,11 @@
+ 
+ extern "C" PlayState* gPlayState;
+ 
++#ifdef __ANDROID__
++static constexpr ZFightingFixType CVAR_DIRT_PATH_DEFAULT = ZFIGHT_FIX_NO_VANISH;
++#else
+ static constexpr ZFightingFixType CVAR_DIRT_PATH_DEFAULT = ZFIGHT_FIX_DISABLED;
++#endif
+ #define CVAR_DIRT_PATH_NAME CVAR_ENHANCEMENT("SceneSpecificDirtPathFix")
+ #define CVAR_DIRT_PATH_VALUE CVarGetInteger(CVAR_DIRT_PATH_NAME, CVAR_DIRT_PATH_DEFAULT)
+ 
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index f374686..84d1e27 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -819,6 +819,9 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                                 roundf(progress) == 100.0f ? " Done. Finishing up." : "");
+                     std::string overlay = extractCount > 0 ? fmt::format("{:.0f}%", progress) : "Starting Up";
+                     ImGui::ProgressBar(progress / 100.0f, ImVec2(600.0f, 50.0f), overlay.c_str());
++#ifdef __ANDROID__
++                    ImGui::TextDisabled("This can take 15-30 minutes on slow phones. Keep the app open and the screen on.");
++#endif
+                     ImGui::EndPopup();
+                 }
+                 ImGui::PopStyleColor(3);
+@@ -837,6 +840,89 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+ #endif
+ }
+ 
++#ifdef __ANDROID__
++// Best-effort native crash log: the engine's own crash handler is disabled on Android.
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <unwind.h>
++
++namespace {
++struct AndroidBacktraceState {
++    uintptr_t* current;
++    uintptr_t* end;
++};
++
++_Unwind_Reason_Code AndroidUnwindCallback(struct _Unwind_Context* ctx, void* arg) {
++    auto* state = static_cast<AndroidBacktraceState*>(arg);
++    uintptr_t pc = _Unwind_GetIP(ctx);
++    if (pc != 0) {
++        if (state->current == state->end) {
++            return _URC_END_OF_STACK;
++        }
++        *state->current++ = pc;
++    }
++    return _URC_NO_REASON;
++}
++
++void AndroidCrashSignalHandler(int sig, siginfo_t* info, void*) {
++    static volatile sig_atomic_t handling = 0;
++    if (handling) {
++        _exit(1);
++    }
++    handling = 1;
++    mkdir("/storage/emulated/0/SOH", 0777);
++    mkdir("/storage/emulated/0/SOH/logs", 0777);
++    int fd = open("/storage/emulated/0/SOH/logs/native-crash.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
++    if (fd >= 0) {
++        char buf[512];
++        int n = snprintf(buf, sizeof(buf), "---- native crash: signal=%d code=%d fault_addr=%p\n", sig,
++                         info != nullptr ? info->si_code : -1, info != nullptr ? info->si_addr : nullptr);
++        if (n > 0) {
++            (void)!write(fd, buf, (size_t)n);
++        }
++        uintptr_t frames[64];
++        AndroidBacktraceState state = { frames, frames + 64 };
++        _Unwind_Backtrace(AndroidUnwindCallback, &state);
++        for (uintptr_t* p = frames; p < state.current; ++p) {
++            Dl_info di;
++            if (dladdr((void*)*p, &di) != 0 && di.dli_fname != nullptr) {
++                n = snprintf(buf, sizeof(buf), "  #%d pc=%p %s+0x%lx\n", (int)(p - frames), (void*)*p, di.dli_fname,
++                             (unsigned long)(*p - (uintptr_t)di.dli_fbase));
++            } else {
++                n = snprintf(buf, sizeof(buf), "  #%d pc=%p\n", (int)(p - frames), (void*)*p);
++            }
++            if (n > 0) {
++                (void)!write(fd, buf, (size_t)n);
++            }
++        }
++        close(fd);
++    }
++    signal(sig, SIG_DFL);
++    raise(sig);
++}
++
++struct AndroidCrashInstaller {
++    AndroidCrashInstaller() {
++        struct sigaction sa;
++        memset(&sa, 0, sizeof(sa));
++        sa.sa_sigaction = AndroidCrashSignalHandler;
++        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
++        sigemptyset(&sa.sa_mask);
++        const int signals[] = { SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL };
++        for (int sig : signals) {
++            sigaction(sig, &sa, nullptr);
++        }
++    }
++};
++static AndroidCrashInstaller sAndroidCrashInstaller;
++} // namespace
++#endif
++
+ void OTRGlobals::Initialize() {
+     std::string mqPath = Ship::Context::LocateFileAcrossAppDirs("oot-mq.o2r", appShortName);
+     if (std::filesystem::exists(mqPath)) {
+diff --git a/soh/soh/SohGui/SohMenuEnhancements.cpp b/soh/soh/SohGui/SohMenuEnhancements.cpp
+index 4cf7305..e6ab3ef 100644
+--- a/soh/soh/SohGui/SohMenuEnhancements.cpp
++++ b/soh/soh/SohGui/SohMenuEnhancements.cpp
+@@ -111,6 +111,11 @@ static const std::map<int32_t, const char*> cursorAnywhereValues = {
+     { PAUSE_ANY_CURSOR_ALWAYS_OFF, "Never" },
+ };
+ 
++#ifdef __ANDROID__
++static constexpr uint32_t kZFightingFixDefault = ZFIGHT_FIX_NO_VANISH;
++#else
++static constexpr uint32_t kZFightingFixDefault = ZFIGHT_FIX_DISABLED;
++#endif
+ static const std::map<int32_t, const char*> zFightingOptions = {
+     { ZFIGHT_FIX_DISABLED, "Disabled" },
+     { ZFIGHT_FIX_CONSISTENT_VANISH, "Consistent Vanish" },
+@@ -1142,7 +1147,7 @@ void SohMenu::AddMenuEnhancements() {
+         .Options(
+             ComboboxOptions()
+                 .ComboMap(zFightingOptions)
+-                .DefaultIndex(ZFIGHT_FIX_DISABLED)
++                .DefaultIndex(kZFightingFixDefault)
+                 .Tooltip("Disabled: Paths vanish more the higher the resolution (Z-Fighting is based on resolution).\n"
+                          "Consistent: Certain paths vanish the same way in all resolutions.\n"
+                          "No Vanish: Paths do not vanish, Link seems to sink in to some paths.\n"
