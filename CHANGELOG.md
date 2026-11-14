@@ -1,5 +1,10 @@
 # Changelog – Android 32-bit (armv7) beta
 
+## v9.2.3-armv7-beta.3
+- Fixed the first-launch hang on Android 6-10: after granting the storage permission the setup now continues (no need to close and reopen the app).
+- The ROM file picker is gone on Android: the app asks you to copy the ROM to the `SOH` folder and scans it again when you press **Retry**.
+- The app is now called "Ship of Harkinian (32-bits)". The game folder is still `SOH`.
+
 ## v9.2.3-armv7-beta.2
 - The app keeps `oot.o2r` when updating (no need to extract the ROM again); the files that ship inside the APK are refreshed on every new build.
 - "Fix Vanishing Paths" now defaults to **No Vanish** on Android.
