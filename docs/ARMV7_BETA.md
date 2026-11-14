@@ -9,14 +9,15 @@ Unofficial community build. **No game files are included: you need your own lega
 **¿Cómo la instalo?**
 1. Si tienes otro Ship of Harkinian instalado (por ejemplo el port original), desinstálalo primero: están firmados con claves distintas. Haz antes una copia de la carpeta `SOH`.
 2. Instala el APK de la última release (permite "instalar apps de fuentes desconocidas").
-3. Copia tu ROM a `/storage/emulated/0/SOH/` y comprueba que el nombre termine en `.z64` (o `.n64` / `.v64`).
-4. Abre la app y responde **Sí** a "generar archivos" y **Sí** a "procesar las ROMs encontradas".
+3. Abre la app y concede el permiso de almacenamiento. Se crea la carpeta `/storage/emulated/0/SOH/`.
+4. Si la app no encuentra ninguna ROM, te lo dirá: copia tu ROM a esa carpeta (el nombre debe terminar en `.z64`, `.n64` o `.v64`) y pulsa **Retry**.
+5. Responde **Sí** a "ROMs found... Would you like to process them?" y espera a que termine la extracción.
 
 **La extracción tarda mucho. ¿Está colgada?**
 En teléfonos lentos puede tardar de 15 a 30 minutos. La barra dice "Starting Up" al principio y solo empieza a avanzar cuando termina el primer bloque de archivos. Deja la app abierta, la pantalla encendida y el cargador conectado. Si llevas más de una hora sin avance, abre un Issue con los archivos de `SOH/logs/`.
 
 **No detecta mi ROM.**
-Comprueba que está directamente en `/storage/emulated/0/SOH/` (no en una subcarpeta), que la extensión es `.z64`, `.n64` o `.v64`, y que la ROM es una versión compatible. Si no la detecta, la app abre el selector de archivos; usa la app de archivos del sistema ("Archivos" / "Documentos").
+Comprueba que está directamente en `/storage/emulated/0/SOH/` (no en una subcarpeta), que la extensión es `.z64`, `.n64` o `.v64`, y que la ROM es una versión compatible. La app ya no abre un selector de archivos: si no encuentra la ROM, te muestra un aviso con la carpeta; copia ahí el archivo y pulsa **Retry**.
 
 **Actualicé la app. ¿Tengo que extraer otra vez?**
 Normalmente no: desde la beta 2 la app conserva `oot.o2r` al actualizar. Solo se pedirá extraer de nuevo si una versión lo indica en sus notas.
@@ -44,14 +45,15 @@ Abre un Issue y adjunta, si existen, estos archivos de `SOH/logs/`:
 **How do I install it?**
 1. If another Ship of Harkinian is installed (e.g. the original port), uninstall it first: they are signed with different keys. Back up your `SOH` folder first.
 2. Install the APK from the latest release (allow "install unknown apps").
-3. Copy your ROM to `/storage/emulated/0/SOH/` and make sure the name ends in `.z64` (or `.n64` / `.v64`).
-4. Open the app and answer **Yes** to "generate files" and **Yes** to "process the ROMs found".
+3. Open the app and grant the storage permission. The folder `/storage/emulated/0/SOH/` is created.
+4. If the app finds no ROM it will tell you: copy your ROM to that folder (the name must end in `.z64`, `.n64` or `.v64`) and press **Retry**.
+5. Answer **Yes** to "ROMs found... Would you like to process them?" and wait for the extraction to finish.
 
 **Extraction takes very long. Is it stuck?**
 On slow phones it can take 15 to 30 minutes. The bar says "Starting Up" at first and only moves once the first group of files is done. Keep the app open, the screen on and the charger connected. If there is no progress after an hour, open an Issue with the files from `SOH/logs/`.
 
 **My ROM is not detected.**
-Check that it is directly in `/storage/emulated/0/SOH/` (not in a subfolder), that the extension is `.z64`, `.n64` or `.v64`, and that the ROM is a supported version. If it is not detected the app opens the file picker; use the system file app ("Files" / "Documents").
+Check that it is directly in `/storage/emulated/0/SOH/` (not in a subfolder), that the extension is `.z64`, `.n64` or `.v64`, and that the ROM is a supported version. The app no longer opens a file picker: if it cannot find the ROM it shows a notice with the folder; copy the file there and press **Retry**.
 
 **I updated the app. Do I have to extract again?**
 Normally no: since beta 2 the app keeps `oot.o2r` when updating. You will only be asked to extract again if a release says so in its notes.
