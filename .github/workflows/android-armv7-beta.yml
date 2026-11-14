@@ -70,7 +70,12 @@ jobs:
           cp soh/soh.o2r Android/app/src/main/assets/soh.o2r
 
       - name: Apply patches
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
+          echo "Patch files found:"
+          ls -la patches/main patches/libultraship 2>/dev/null || echo "(no patches folder found)"
           shopt -s nullglob
           for p in patches/main/*.patch; do
             echo "Applying $p"
@@ -83,6 +88,12 @@ jobs:
             done
           done
           grep -q "abiFilters 'armeabi-v7a'" Android/app/build.gradle
+          VERSION_NAME="$(grep -oP 'versionName "\K[^"]+' Android/app/build.gradle)"
+          echo "versionName after patches: $VERSION_NAME"
+          if [ "$EVENT_NAME" = "release" ] && [ "v$VERSION_NAME" != "$RELEASE_TAG" ]; then
+            echo "::error::versionName ($VERSION_NAME) does not match the release tag ($RELEASE_TAG). Check that every patch is inside patches/main/ and ends in .patch."
+            exit 1
+          fi
 
       - name: Enable compiler cache in the native build
         run: |
