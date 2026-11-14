@@ -1,0 +1,137 @@
+diff --git a/Android/app/build.gradle b/Android/app/build.gradle
+index f0a4e00..c81d76b 100644
+--- a/Android/app/build.gradle
++++ b/Android/app/build.gradle
+@@ -20,8 +20,8 @@ android {
+         }
+         minSdkVersion 24
+         targetSdkVersion 33
+-        versionCode 11
+-        versionName "9.2.3-armv7-beta.2"
++        versionCode 12
++        versionName "9.2.3-armv7-beta.3"
+     }
+     signingConfigs {
+         release {
+diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+index 18bab46..9362152 100644
+--- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
++++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+@@ -479,6 +479,7 @@ public class MainActivity extends SDLActivity{
+             // Handle MANAGE_EXTERNAL_STORAGE result
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                 if (Environment.isExternalStorageManager()) {
++                    doVersionCheck();
+                     checkAndSetupFiles();
+                 } else {
+                     Toast.makeText(this, "Storage permission is required to access files.", Toast.LENGTH_LONG).show();
+@@ -487,6 +488,21 @@ public class MainActivity extends SDLActivity{
+         }
+     }
+ 
++    // Android 6-10: the runtime permission answer arrives here. Without this the first launch never finished
++    // its setup (the native side waits forever) until the app was closed and opened again.
++    @Override
++    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
++        if (requestCode == STORAGE_PERMISSION_REQUEST_CODE) {
++            if (hasStoragePermission()) {
++                doVersionCheck();
++                checkAndSetupFiles();
++            } else {
++                Toast.makeText(this, "Storage permission is required to access files.", Toast.LENGTH_LONG).show();
++            }
++        }
++    }
++
+     private void diag(String msg) {
+         try {
+             File d = new File(Environment.getExternalStorageDirectory(), "SOH/logs");
+diff --git a/Android/app/src/main/res/values/strings.xml b/Android/app/src/main/res/values/strings.xml
+index f7259ff..55e6115 100644
+--- a/Android/app/src/main/res/values/strings.xml
++++ b/Android/app/src/main/res/values/strings.xml
+@@ -1,3 +1,3 @@
+ <resources>
+-    <string name="app_name">Ship of Harkinian</string>
++    <string name="app_name">Ship of Harkinian (32-bits)</string>
+ </resources>
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 84d1e27..e964c36 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -651,9 +651,13 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                             std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot.o2r", appShortName));
+ 
+                         if (!ootO2RExists) {
++#ifdef __ANDROID__
++                            promptStep = PS_LOCAL;
++#else
+                             SohGui::RegisterPopup(
+                                 "No O2R Files", "No O2R files found. Generate one now?", "Yes", "No",
+                                 [&]() { promptStep = PS_LOCAL; }, [&]() { exit(0); });
++#endif
+                         } else {
+                             extractStep = ES_VERIFY;
+                         }
+@@ -670,12 +674,33 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                         args.erase(std::unique(args.begin(), args.end()), args.end());
+                         if (!args.empty()) {
+                             promptStep = PS_WAIT;
++#ifdef __ANDROID__
++                            SohGui::RegisterPopup(
++                                "ROMs found", "ROMs found in the SOH folder. Would you like to process them?", "Yes",
++                                "No", [&]() { extractStep = ES_EXTRACT_ARGS; }, [&]() { exit(0); });
++#else
+                             SohGui::RegisterPopup(
+                                 "ROMs found", "ROMs found in application directory. Would you like to process them?",
+                                 "Yes", "No", [&]() { extractStep = ES_EXTRACT_ARGS; },
+                                 [&]() { promptStep = PS_FIRST; });
++#endif
+                         } else {
++#ifdef __ANDROID__
++                            promptStep = PS_WAIT;
++                            SohGui::RegisterPopup(
++                                "ROM not found",
++                                "Copy your ROM (.z64, .n64 or .v64) to this folder:\n/storage/emulated/0/SOH/\n\n"
++                                "Then press Retry.\n\n"
++                                "Copia tu ROM (.z64, .n64 o .v64) a la carpeta /storage/emulated/0/SOH/ y pulsa Retry.",
++                                "Retry", "Close",
++                                [&]() {
++                                    args.clear();
++                                    promptStep = PS_LOCAL;
++                                },
++                                [&]() { exit(0); });
++#else
+                             promptStep = PS_FIRST;
++#endif
+                         }
+                         continue;
+                     }
+@@ -715,22 +740,10 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                             "Extraction Complete", "ROM Extracted. Extract another?", "Yes", "No",
+                             [&]() {
+ #ifdef __ANDROID__
+-                                // nativeDialogResult fires on the Java UI thread.
+-                                // ManuallySearchForRomMatchingType opens a file picker and busy-waits
+-                                // for nativeHandleSelectedFile — also dispatched on the UI thread — deadlock.
+-                                // Run on the thread pool so the UI thread stays free to receive the result.
+-                                extractionTask = threadPool->submit_task([&]() -> void {
+-                                    if (!extract.ManuallySearchForRomMatchingType(generatedIsMQ ? RomSearchMode::Vanilla
+-                                                                                                : RomSearchMode::MQ)) {
+-                                        extractStep = ES_VERIFY;
+-                                        return;
+-                                    }
+-                                    extract.CallZapd(installPath, Ship::Context::GetAppDirectoryPath(appShortName),
+-                                                     &extractCount, &totalExtract);
+-                                    extractStep = ES_VERIFY;
+-                                    extractCount = 0;
+-                                    totalExtract = 0;
+-                                });
++                                // No file picker on Android: look in the SOH folder again for the other ROM.
++                                args.clear();
++                                extractStep = ES_EXTRACT;
++                                promptStep = PS_LOCAL;
+ #else
+                                 if (!extract.ManuallySearchForRomMatchingType(generatedIsMQ ? RomSearchMode::Vanilla
+                                                                                             : RomSearchMode::MQ)) {
