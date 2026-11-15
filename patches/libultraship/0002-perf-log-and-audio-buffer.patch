@@ -1,0 +1,302 @@
+diff --git a/include/ship/PerfLog.h b/include/ship/PerfLog.h
+new file mode 100644
+index 0000000..301ebbc
+--- /dev/null
++++ b/include/ship/PerfLog.h
+@@ -0,0 +1,190 @@
++#pragma once
++// Lightweight performance log for the Android armv7 beta.
++// Create the folder SOH/perf_log to enable it; the result is written to SOH/logs/perf.txt every 5 seconds.
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <mutex>
++#include <string>
++#include <sys/stat.h>
++#include <spdlog/fmt/fmt.h>
++
++namespace PerfLog {
++
++using Clock = std::chrono::steady_clock;
++
++inline Clock::time_point Now() {
++    return Clock::now();
++}
++
++inline double Ms(Clock::time_point a, Clock::time_point b) {
++    return std::chrono::duration<double, std::milli>(b - a).count();
++}
++
++inline bool FolderExists(const char* name) {
++#ifdef __ANDROID__
++    struct stat st;
++    std::string path = std::string("/storage/emulated/0/SOH/") + name;
++    return stat(path.c_str(), &st) == 0;
++#else
++    (void)name;
++    return false;
++#endif
++}
++
++inline bool Enabled() {
++    static const bool enabled = FolderExists("perf_log");
++    return enabled;
++}
++
++// Always writes (used for one-off notes such as the audio configuration).
++inline void WriteLine(const std::string& text) {
++#ifdef __ANDROID__
++    mkdir("/storage/emulated/0/SOH/logs", 0777);
++    FILE* f = fopen("/storage/emulated/0/SOH/logs/perf.txt", "a");
++    if (f != nullptr) {
++        fputs(text.c_str(), f);
++        fputc('\n', f);
++        fclose(f);
++    }
++#else
++    (void)text;
++#endif
++}
++
++struct Stat {
++    double sum = 0;
++    double max = 0;
++    double min = 1e18;
++    uint32_t n = 0;
++    void Add(double v) {
++        sum += v;
++        if (v > max) {
++            max = v;
++        }
++        if (v < min) {
++            min = v;
++        }
++        n++;
++    }
++    double Avg() const {
++        return n > 0 ? sum / n : 0.0;
++    }
++    double Min() const {
++        return n > 0 ? min : 0.0;
++    }
++};
++
++struct State {
++    std::mutex mutex;
++    Clock::time_point startTime = Clock::now();
++    Clock::time_point windowStart = Clock::now();
++    Clock::time_point lastFrame;
++    Clock::time_point lastAudio;
++    bool haveLastFrame = false;
++    bool haveLastAudio = false;
++    uint32_t frames = 0;
++    uint32_t dropped = 0;
++    uint32_t audioCalls = 0;
++    uint32_t underruns = 0;
++    int targetFps = 0;
++    uint32_t width = 0;
++    uint32_t height = 0;
++    Stat frameGap, run, gui, end, total, audioGap, buffered;
++};
++
++inline State& S() {
++    static State state;
++    return state;
++}
++
++// The caller holds the mutex.
++inline void MaybeFlush(State& s, Clock::time_point now) {
++    double elapsed = Ms(s.windowStart, now) / 1000.0;
++    if (elapsed < 5.0) {
++        return;
++    }
++    WriteLine(fmt::format(
++        "t={:.0f}s target_fps={} window={}x{} fps={:.1f} frame_gap_ms avg/max={:.1f}/{:.1f} gfx_ms avg/max={:.1f}/{:.1f} run={:.1f}/{:.1f} "
++        "gui={:.1f}/{:.1f} end={:.1f}/{:.1f} dropped={} | audio_calls={} gap_ms avg/max={:.1f}/{:.1f} "
++        "buffered min/avg={:.0f}/{:.0f} underruns={}",
++        Ms(s.startTime, now) / 1000.0, s.targetFps, s.width, s.height, s.frames / elapsed, s.frameGap.Avg(), s.frameGap.max, s.total.Avg(), s.total.max,
++        s.run.Avg(), s.run.max, s.gui.Avg(), s.gui.max, s.end.Avg(), s.end.max, s.dropped, s.audioCalls,
++        s.audioGap.Avg(), s.audioGap.max, s.buffered.Min(), s.buffered.Avg(), s.underruns));
++    s.windowStart = now;
++    s.frames = 0;
++    s.dropped = 0;
++    s.audioCalls = 0;
++    s.underruns = 0;
++    s.frameGap = Stat();
++    s.run = Stat();
++    s.gui = Stat();
++    s.end = Stat();
++    s.total = Stat();
++    s.audioGap = Stat();
++    s.buffered = Stat();
++}
++
++// One rendered frame: t0 start, t1 after the frame setup, t2 after the game commands, t3 after the GUI, t4 after the swap.
++inline void Frame(Clock::time_point t0, Clock::time_point t1, Clock::time_point t2, Clock::time_point t3,
++                  Clock::time_point t4) {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    if (s.haveLastFrame) {
++        s.frameGap.Add(Ms(s.lastFrame, t0));
++    }
++    s.lastFrame = t0;
++    s.haveLastFrame = true;
++    s.run.Add(Ms(t1, t2));
++    s.gui.Add(Ms(t2, t3));
++    s.end.Add(Ms(t3, t4));
++    s.total.Add(Ms(t0, t4));
++    s.frames++;
++    MaybeFlush(s, t4);
++}
++
++// Current settings, printed with every line.
++inline void SetInfo(int targetFps, uint32_t width, uint32_t height) {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    s.targetFps = targetFps;
++    s.width = width;
++    s.height = height;
++}
++
++inline void Dropped() {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    s.dropped++;
++}
++
++// Called every time the game hands a block of audio to the player; "buffered" is what was still queued.
++inline void Audio(int buffered) {
++    if (!Enabled()) {
++        return;
++    }
++    Clock::time_point now = Now();
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    if (s.haveLastAudio) {
++        s.audioGap.Add(Ms(s.lastAudio, now));
++    }
++    s.lastAudio = now;
++    s.haveLastAudio = true;
++    s.buffered.Add(buffered);
++    if (buffered <= 0) {
++        s.underruns++;
++    }
++    s.audioCalls++;
++}
++
++} // namespace PerfLog
+diff --git a/include/ship/audio/SDLAudioPlayer.h b/include/ship/audio/SDLAudioPlayer.h
+index 8d9a08e..19d08c3 100644
+--- a/include/ship/audio/SDLAudioPlayer.h
++++ b/include/ship/audio/SDLAudioPlayer.h
+@@ -19,5 +19,6 @@ class SDLAudioPlayer final : public AudioPlayer {
+   private:
+     SDL_AudioDeviceID mDevice = 0;
+     int32_t mNumChannels = 2;
++    int32_t mQueueCap = 6000; // do not queue more audio than this many samples
+ };
+ } // namespace Ship
+diff --git a/src/fast/Fast3dWindow.cpp b/src/fast/Fast3dWindow.cpp
+index da8adcf..90fb770 100644
+--- a/src/fast/Fast3dWindow.cpp
++++ b/src/fast/Fast3dWindow.cpp
+@@ -1,4 +1,5 @@
+ #include "fast/Fast3dWindow.h"
++#include "ship/PerfLog.h"
+ 
+ #include "ship/Context.h"
+ #include "ship/config/Config.h"
+@@ -192,9 +193,11 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
+ 
+     // Skip dropped frames
+     if (!wnd->IsFrameReady()) {
++        PerfLog::Dropped();
+         return false;
+     }
+ 
++    const auto perfT0 = PerfLog::Now();
+     auto gui = wnd->GetGui();
+     // Setup mouse state manager
+     wnd->GetMouseStateManager()->StartFrame();
+@@ -202,12 +205,19 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
+     gui->StartDraw();
+     // Setup game framebuffers to match available window space
+     mInterpreter->StartFrame();
++    const auto perfT1 = PerfLog::Now();
+     // Execute the games gfx commands
+     mInterpreter->Run(commands, mtxReplacements);
++    const auto perfT2 = PerfLog::Now();
+     // Renders the game frame buffer to the final window and finishes the GUI
+     gui->EndDraw();
++    const auto perfT3 = PerfLog::Now();
+     // Finalize swap buffers
+     mInterpreter->EndFrame();
++    if (PerfLog::Enabled()) {
++        PerfLog::SetInfo(mInterpreter->GetTargetFps(), wnd->GetWidth(), wnd->GetHeight());
++    }
++    PerfLog::Frame(perfT0, perfT1, perfT2, perfT3, PerfLog::Now());
+ 
+     return true;
+ }
+diff --git a/src/ship/audio/SDLAudioPlayer.cpp b/src/ship/audio/SDLAudioPlayer.cpp
+index d9f1e44..79730c5 100644
+--- a/src/ship/audio/SDLAudioPlayer.cpp
++++ b/src/ship/audio/SDLAudioPlayer.cpp
+@@ -1,5 +1,9 @@
+ #include "ship/audio/SDLAudioPlayer.h"
+ #include <spdlog/spdlog.h>
++#include <spdlog/fmt/fmt.h>
++#include <sys/stat.h>
++#include <string>
++#include "ship/PerfLog.h"
+ 
+ namespace Ship {
+ 
+@@ -45,6 +49,27 @@ bool SDLAudioPlayer::DoInit() {
+ 
+     SPDLOG_INFO("SDL Audio initialized: {} channels, {} Hz", mNumChannels, this->GetSampleRate());
+ 
++#ifdef __ANDROID__
++    {
++        // Extra audio buffering for slow CPUs. Create one of these folders inside SOH to enable it:
++        // audio_buf_100 (about 100 ms), audio_buf_150 or audio_buf_200.
++        int32_t desired = 0;
++        if (PerfLog::FolderExists("audio_buf_200")) {
++            desired = 6400;
++        } else if (PerfLog::FolderExists("audio_buf_150")) {
++            desired = 4800;
++        } else if (PerfLog::FolderExists("audio_buf_100")) {
++            desired = 3200;
++        }
++        if (desired > 0) {
++            this->SetDesiredBuffered(desired);
++            mQueueCap = desired + 3600;
++        }
++        PerfLog::WriteLine(fmt::format("[perf] audio rate={} desired_buffered={} queue_cap={}", this->GetSampleRate(),
++                                       this->GetDesiredBuffered(), mQueueCap));
++    }
++#endif
++
+     SDL_PauseAudioDevice(mDevice, 0);
+     return true;
+ }
+@@ -54,7 +79,9 @@ int SDLAudioPlayer::Buffered() {
+ }
+ 
+ void SDLAudioPlayer::DoPlay(const uint8_t* buf, size_t len) {
+-    if (Buffered() < 6000) {
++    int buffered = Buffered();
++    PerfLog::Audio(buffered);
++    if (buffered < mQueueCap) {
+         // Don't fill the audio buffer too much in case this happens
+         SDL_QueueAudio(mDevice, buf, len);
+     }
