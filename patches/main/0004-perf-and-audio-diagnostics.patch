@@ -1,0 +1,44 @@
+diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+index 9362152..5026004 100644
+--- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
++++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+@@ -132,7 +132,7 @@ public class MainActivity extends SDLActivity{
+     // Keeps the diagnostic files small: anything above 1 MB is removed at startup.
+     private void trimLogs() {
+         String[] names = { "java-diag.txt", "extract-diag.txt", "gfx-diag.txt", "zapd.txt", "java-crash.txt",
+-                "native-crash.txt" };
++                "native-crash.txt", "perf.txt" };
+         for (String name : names) {
+             File f = new File(getLogsDir(), name);
+             if (f.exists() && f.length() > 1024 * 1024) {
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index e964c36..1cd6c6c 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -1,5 +1,11 @@
+ #include "OTRGlobals.h"
+ #include "OTRAudio.h"
++#ifdef __ANDROID__
++#include <errno.h>
++#include <sys/resource.h>
++#include <spdlog/fmt/fmt.h>
++#include "ship/PerfLog.h"
++#endif
+ #include <algorithm>
+ #include <atomic>
+ #include <filesystem>
+@@ -1181,6 +1187,14 @@ extern "C" int AudioPlayer_GetDesiredBuffered(void);
+ std::unordered_map<std::string, ExtensionEntry> ExtensionCache;
+ 
+ void OTRAudio_Thread() {
++#ifdef __ANDROID__
++    // Optional: create the folder SOH/audio_prio to run the audio thread with a higher priority.
++    if (PerfLog::FolderExists("audio_prio")) {
++        errno = 0;
++        int rc = setpriority(PRIO_PROCESS, 0, -16);
++        PerfLog::WriteLine(fmt::format("[perf] audio thread priority: rc={} errno={}", rc, errno));
++    }
++#endif
+     while (audio.running) {
+         {
+             std::unique_lock<std::mutex> Lock(audio.mutex);
