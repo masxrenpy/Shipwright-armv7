@@ -1,0 +1,319 @@
+diff --git a/include/ship/PerfLog.h b/include/ship/PerfLog.h
+index 301ebbc..8efe8d8 100644
+--- a/include/ship/PerfLog.h
++++ b/include/ship/PerfLog.h
+@@ -1,13 +1,18 @@
+ #pragma once
+ // Lightweight performance log for the Android armv7 beta.
+ // Create the folder SOH/perf_log to enable it; the result is written to SOH/logs/perf.txt every 5 seconds.
++#include <atomic>
+ #include <chrono>
+ #include <cstdint>
+ #include <cstdio>
+ #include <mutex>
+ #include <string>
+ #include <sys/stat.h>
++#include <unistd.h>
+ #include <spdlog/fmt/fmt.h>
++#ifdef __ANDROID__
++#include <sched.h>
++#endif
+ 
+ namespace PerfLog {
+ 
+@@ -75,22 +80,87 @@ struct Stat {
+     }
+ };
+ 
++// Counters filled by the OpenGL backend (lock free: they are touched for every draw call).
++struct Counters {
++    std::atomic<uint64_t> draws{ 0 };
++    std::atomic<uint64_t> drawTris{ 0 };
++    std::atomic<uint64_t> drawNs{ 0 };
++    std::atomic<uint64_t> uploads{ 0 };
++    std::atomic<uint64_t> uploadNs{ 0 };
++    std::atomic<uint64_t> compiles{ 0 };
++    std::atomic<uint64_t> compileNs{ 0 };
++    std::atomic<uint64_t> compileMaxNs{ 0 };
++};
++
++inline Counters& C() {
++    static Counters counters;
++    return counters;
++}
++
++enum class Kind { Draw, Upload, Compile };
++
++class ScopedTimer {
++  public:
++    ScopedTimer(Kind kind, uint64_t arg = 0) : mKind(kind), mArg(arg), mOn(Enabled()) {
++        if (mOn) {
++            mStart = Clock::now();
++        }
++    }
++    ~ScopedTimer() {
++        if (!mOn) {
++            return;
++        }
++        uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - mStart).count();
++        Counters& c = C();
++        switch (mKind) {
++            case Kind::Draw:
++                c.draws++;
++                c.drawTris += mArg;
++                c.drawNs += ns;
++                break;
++            case Kind::Upload:
++                c.uploads++;
++                c.uploadNs += ns;
++                break;
++            case Kind::Compile: {
++                c.compiles++;
++                c.compileNs += ns;
++                uint64_t prev = c.compileMaxNs.load();
++                while (ns > prev && !c.compileMaxNs.compare_exchange_weak(prev, ns)) {
++                }
++                break;
++            }
++        }
++    }
++
++  private:
++    Kind mKind;
++    uint64_t mArg;
++    bool mOn;
++    Clock::time_point mStart;
++};
++
+ struct State {
+     std::mutex mutex;
+     Clock::time_point startTime = Clock::now();
+     Clock::time_point windowStart = Clock::now();
+     Clock::time_point lastFrame;
+     Clock::time_point lastAudio;
++    Clock::time_point lastTick;
+     bool haveLastFrame = false;
+     bool haveLastAudio = false;
++    bool haveLastTick = false;
+     uint32_t frames = 0;
+     uint32_t dropped = 0;
+     uint32_t audioCalls = 0;
+     uint32_t underruns = 0;
++    uint32_t ticks = 0;
+     int targetFps = 0;
+     uint32_t width = 0;
+     uint32_t height = 0;
++    std::string extra;
+     Stat frameGap, run, gui, end, total, audioGap, buffered;
++    Stat tickGap, interp, render, audioWait, logic;
+ };
+ 
+ inline State& S() {
+@@ -98,6 +168,72 @@ inline State& S() {
+     return state;
+ }
+ 
++// Current CPU of the calling thread and the current frequency (MHz) of every core.
++inline std::string CpuInfo() {
++#ifdef __ANDROID__
++    std::string out = fmt::format("cpu={} freq_mhz=", sched_getcpu());
++    long ncpu = sysconf(_SC_NPROCESSORS_CONF);
++    if (ncpu > 16) {
++        ncpu = 16;
++    }
++    for (long i = 0; i < ncpu; i++) {
++        std::string path = fmt::format("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
++        long khz = -1;
++        FILE* f = fopen(path.c_str(), "r");
++        if (f != nullptr) {
++            if (fscanf(f, "%ld", &khz) != 1) {
++                khz = -1;
++            }
++            fclose(f);
++        }
++        out += fmt::format("{}{}", i > 0 ? "," : "", khz > 0 ? khz / 1000 : -1);
++    }
++    return out;
++#else
++    return std::string();
++#endif
++}
++
++// Pins the calling thread to the cores with the highest maximum frequency.
++inline void PinToFastestCores() {
++#ifdef __ANDROID__
++    long ncpu = sysconf(_SC_NPROCESSORS_CONF);
++    if (ncpu > 16) {
++        ncpu = 16;
++    }
++    long maxFreq[16] = { 0 };
++    long best = 0;
++    for (long i = 0; i < ncpu; i++) {
++        std::string path = fmt::format("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq", i);
++        FILE* f = fopen(path.c_str(), "r");
++        if (f != nullptr) {
++            if (fscanf(f, "%ld", &maxFreq[i]) != 1) {
++                maxFreq[i] = 0;
++            }
++            fclose(f);
++        }
++        if (maxFreq[i] > best) {
++            best = maxFreq[i];
++        }
++    }
++    if (best == 0) {
++        WriteLine("[perf] cpu_big: could not read the core frequencies");
++        return;
++    }
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    std::string cores;
++    for (long i = 0; i < ncpu; i++) {
++        if (maxFreq[i] == best) {
++            CPU_SET((int)i, &set);
++            cores += fmt::format("{}{}", cores.empty() ? "" : ",", i);
++        }
++    }
++    int rc = sched_setaffinity(0, sizeof(set), &set);
++    WriteLine(fmt::format("[perf] cpu_big: max_freq_khz={} cores={} rc={}", best, cores, rc));
++#endif
++}
++
+ // The caller holds the mutex.
+ inline void MaybeFlush(State& s, Clock::time_point now) {
+     double elapsed = Ms(s.windowStart, now) / 1000.0;
+@@ -105,17 +241,38 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
+         return;
+     }
+     WriteLine(fmt::format(
+-        "t={:.0f}s target_fps={} window={}x{} fps={:.1f} frame_gap_ms avg/max={:.1f}/{:.1f} gfx_ms avg/max={:.1f}/{:.1f} run={:.1f}/{:.1f} "
+-        "gui={:.1f}/{:.1f} end={:.1f}/{:.1f} dropped={} | audio_calls={} gap_ms avg/max={:.1f}/{:.1f} "
++        "t={:.0f}s target_fps={} window={}x{} fps={:.1f} frame_gap_ms avg/max={:.1f}/{:.1f} gfx_ms avg/max={:.1f}/{:.1f} "
++        "run={:.1f}/{:.1f} gui={:.1f}/{:.1f} end={:.1f}/{:.1f} dropped={} | audio_calls={} gap_ms avg/max={:.1f}/{:.1f} "
+         "buffered min/avg={:.0f}/{:.0f} underruns={}",
+-        Ms(s.startTime, now) / 1000.0, s.targetFps, s.width, s.height, s.frames / elapsed, s.frameGap.Avg(), s.frameGap.max, s.total.Avg(), s.total.max,
+-        s.run.Avg(), s.run.max, s.gui.Avg(), s.gui.max, s.end.Avg(), s.end.max, s.dropped, s.audioCalls,
+-        s.audioGap.Avg(), s.audioGap.max, s.buffered.Min(), s.buffered.Avg(), s.underruns));
++        Ms(s.startTime, now) / 1000.0, s.targetFps, s.width, s.height, s.frames / elapsed, s.frameGap.Avg(),
++        s.frameGap.max, s.total.Avg(), s.total.max, s.run.Avg(), s.run.max, s.gui.Avg(), s.gui.max, s.end.Avg(),
++        s.end.max, s.dropped, s.audioCalls, s.audioGap.Avg(), s.audioGap.max, s.buffered.Min(), s.buffered.Avg(),
++        s.underruns));
++
++    Counters& c = C();
++    double frames = s.frames > 0 ? (double)s.frames : 1.0;
++    double draws = (double)c.draws.exchange(0);
++    double tris = (double)c.drawTris.exchange(0);
++    double drawMs = (double)c.drawNs.exchange(0) / 1e6;
++    double uploads = (double)c.uploads.exchange(0);
++    double uploadMs = (double)c.uploadNs.exchange(0) / 1e6;
++    uint64_t compiles = c.compiles.exchange(0);
++    double compileMs = (double)c.compileNs.exchange(0) / 1e6;
++    double compileMax = (double)c.compileMaxNs.exchange(0) / 1e6;
++    WriteLine(fmt::format(
++        "   + gl per frame: draws={:.0f} tris={:.0f} draw_ms={:.1f} uploads={:.1f} upload_ms={:.2f} | shader_compiles={} "
++        "total/max_ms={:.1f}/{:.1f} | ticks={} tick_ms gap avg/max={:.1f}/{:.1f} interp={:.1f}/{:.1f} render={:.1f}/{:.1f} "
++        "audio_wait={:.1f}/{:.1f} logic~={:.1f}/{:.1f} | {} | {}",
++        draws / frames, tris / frames, drawMs / frames, uploads / frames, uploadMs / frames, compiles, compileMs,
++        compileMax, s.ticks, s.tickGap.Avg(), s.tickGap.max, s.interp.Avg(), s.interp.max, s.render.Avg(), s.render.max,
++        s.audioWait.Avg(), s.audioWait.max, s.logic.Avg(), s.logic.max, CpuInfo(), s.extra));
++
+     s.windowStart = now;
+     s.frames = 0;
+     s.dropped = 0;
+     s.audioCalls = 0;
+     s.underruns = 0;
++    s.ticks = 0;
+     s.frameGap = Stat();
+     s.run = Stat();
+     s.gui = Stat();
+@@ -123,6 +280,11 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
+     s.total = Stat();
+     s.audioGap = Stat();
+     s.buffered = Stat();
++    s.tickGap = Stat();
++    s.interp = Stat();
++    s.render = Stat();
++    s.audioWait = Stat();
++    s.logic = Stat();
+ }
+ 
+ // One rendered frame: t0 start, t1 after the frame setup, t2 after the game commands, t3 after the GUI, t4 after the swap.
+@@ -146,6 +308,42 @@ inline void Frame(Clock::time_point t0, Clock::time_point t1, Clock::time_point
+     MaybeFlush(s, t4);
+ }
+ 
++// One game tick (20 per second at full speed): start of the tick, after the frame interpolation setup, after all the
++// frames of the tick were rendered, after waiting for the audio thread.
++inline void Tick(Clock::time_point start, Clock::time_point interpEnd, Clock::time_point renderEnd,
++                 Clock::time_point audioEnd) {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    double interp = Ms(start, interpEnd);
++    double render = Ms(interpEnd, renderEnd);
++    double audioWait = Ms(renderEnd, audioEnd);
++    if (s.haveLastTick) {
++        double gap = Ms(s.lastTick, start);
++        s.tickGap.Add(gap);
++        double logic = gap - (interp + render + audioWait);
++        s.logic.Add(logic > 0 ? logic : 0);
++    }
++    s.lastTick = start;
++    s.haveLastTick = true;
++    s.interp.Add(interp);
++    s.render.Add(render);
++    s.audioWait.Add(audioWait);
++    s.ticks++;
++}
++
++// Free text printed with every report (current settings).
++inline void SetExtra(const std::string& text) {
++    if (!Enabled()) {
++        return;
++    }
++    State& s = S();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    s.extra = text;
++}
++
+ // Current settings, printed with every line.
+ inline void SetInfo(int targetFps, uint32_t width, uint32_t height) {
+     if (!Enabled()) {
+diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
+index 0d700b1..9ef0799 100644
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -33,6 +33,7 @@
+ #include <system_error>
+ #include <sys/stat.h>
+ #include <spdlog/fmt/fmt.h>
++#include "ship/PerfLog.h"
+ 
+ // --- Android / OpenGL ES helpers (armv7 beta) ---
+ static void GfxFileLog(const std::string& s) {
+@@ -440,6 +441,7 @@ static std::string BuildVsShader(const CCFeatures& cc_features) {
+ }
+ 
+ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint32_t shader_id1) {
++    PerfLog::ScopedTimer perfTimer(PerfLog::Kind::Compile);
+     CCFeatures cc_features;
+     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
+     const auto fs_buf = BuildFsShader(cc_features);
+@@ -610,6 +612,7 @@ void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
+ }
+ 
+ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
++    PerfLog::ScopedTimer perfTimer(PerfLog::Kind::Upload);
+     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
+     textures[mCurrentTextureIds[mCurrentTile]].width = width;
+     textures[mCurrentTextureIds[mCurrentTile]].height = height;
+@@ -676,6 +679,7 @@ void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
+ }
+ 
+ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
++    PerfLog::ScopedTimer perfTimer(PerfLog::Kind::Draw, buf_vbo_num_tris);
+     if (mCurrentDepthTest != mLastDepthTest || mCurrentDepthMask != mLastDepthMask) {
+         mLastDepthTest = mCurrentDepthTest;
+         mLastDepthMask = mCurrentDepthMask;
