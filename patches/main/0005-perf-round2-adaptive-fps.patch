@@ -1,5 +1,5 @@
 diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
-index 5026004..abb51dd 100644
+index 5026004..609f01d 100644
 --- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
 +++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
 @@ -98,6 +98,16 @@ public class MainActivity extends SDLActivity{
@@ -19,14 +19,16 @@ index 5026004..abb51dd 100644
          int currentVersion = BuildConfig.VERSION_CODE;
          int storedVersion = preferences.getInt("appVersion", -1);
          int storedFormat = preferences.getInt("assetFormatVersion", ASSET_FORMAT_VERSION);
-@@ -148,6 +158,11 @@ public class MainActivity extends SDLActivity{
+@@ -148,6 +158,13 @@ public class MainActivity extends SDLActivity{
          sb.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
          sb.append("android=").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
          sb.append("abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS)).append('\n');
 +        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-+            sb.append("sustained_perf_supported=")
-+                    .append(getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_SUSTAINED_PERFORMANCE))
-+                    .append('\n');
++            try {
++                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
++                sb.append("sustained_perf_supported=").append(pm.isSustainedPerformanceModeSupported()).append('\n');
++            } catch (Exception ignored) {
++            }
 +        }
          try {
              android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
