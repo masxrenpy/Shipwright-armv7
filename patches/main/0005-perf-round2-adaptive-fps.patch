@@ -1,0 +1,195 @@
+diff --git a/Android/app/src/main/java/com/dishii/soh/MainActivity.java b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+index 5026004..abb51dd 100644
+--- a/Android/app/src/main/java/com/dishii/soh/MainActivity.java
++++ b/Android/app/src/main/java/com/dishii/soh/MainActivity.java
+@@ -98,6 +98,16 @@ public class MainActivity extends SDLActivity{
+         writeDeviceInfo();
+         logLastExitReasons();
+ 
++        // Optional: create the folder SOH/sustained_perf to ask Android for sustained performance mode (less throttling).
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
++                && new File(new File(Environment.getExternalStorageDirectory(), "SOH"), "sustained_perf").exists()) {
++            try {
++                getWindow().setSustainedPerformanceMode(true);
++                writeLogFile("perf.txt", "[perf] sustained performance mode requested\n", true);
++            } catch (Exception ignored) {
++            }
++        }
++
+         int currentVersion = BuildConfig.VERSION_CODE;
+         int storedVersion = preferences.getInt("appVersion", -1);
+         int storedFormat = preferences.getInt("assetFormatVersion", ASSET_FORMAT_VERSION);
+@@ -148,6 +158,11 @@ public class MainActivity extends SDLActivity{
+         sb.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
+         sb.append("android=").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+         sb.append("abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS)).append('\n');
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
++            sb.append("sustained_perf_supported=")
++                    .append(getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_SUSTAINED_PERFORMANCE))
++                    .append('\n');
++        }
+         try {
+             android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+             android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 1cd6c6c..4b22083 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -1,6 +1,7 @@
+ #include "OTRGlobals.h"
+ #include "OTRAudio.h"
+ #ifdef __ANDROID__
++#include <chrono>
+ #include <errno.h>
+ #include <sys/resource.h>
+ #include <spdlog/fmt/fmt.h>
+@@ -1168,7 +1169,83 @@ bool OTRGlobals::HasOriginal() {
+     return hasOriginal;
+ }
+ 
+-uint32_t OTRGlobals::GetInterpolationFPS() {
++#ifdef __ANDROID__
++namespace {
++std::atomic<int> sAdaptiveCap{ 0 };
++std::atomic<uint32_t> sAdaptiveUserFps{ 20 };
++
++// Optional: create the folder SOH/adaptive_fps to keep the game at full speed on slow phones by lowering the
++// interpolated FPS automatically when the game logic falls below 20 ticks per second.
++bool AdaptiveEnabled() {
++    static const bool enabled = PerfLog::FolderExists("adaptive_fps");
++    return enabled;
++}
++} // namespace
++
++static uint32_t AdaptiveCap(uint32_t fps) {
++    if (!AdaptiveEnabled()) {
++        return fps;
++    }
++    sAdaptiveUserFps = fps;
++    int cap = sAdaptiveCap.load();
++    return (cap > 0 && (uint32_t)cap < fps) ? (uint32_t)cap : fps;
++}
++
++// Called once per game tick.
++static void AdaptiveFpsTick() {
++    if (!AdaptiveEnabled()) {
++        return;
++    }
++    using Clock = std::chrono::steady_clock;
++    static Clock::time_point firstTick;
++    static Clock::time_point holdUntil = Clock::now();
++    static int ticks = 0;
++    static int stable = 0;
++    static int backoffSeconds = 30; // grows after every reduction so the cap does not keep oscillating
++    Clock::time_point now = Clock::now();
++    if (ticks == 0) {
++        firstTick = now;
++    }
++    ticks++;
++    double span = std::chrono::duration<double>(now - firstTick).count();
++    if (span < 3.0) {
++        return;
++    }
++    // Exact tick rate of the last window (the game runs at 20 ticks per second at full speed).
++    double rate = (ticks - 1) / span;
++    ticks = 0;
++    int user = (int)sAdaptiveUserFps.load();
++    int cap = sAdaptiveCap.load();
++    if (cap <= 0) {
++        cap = user;
++    }
++    int newCap = cap;
++    if (rate < 19.4 && cap > 20) {
++        newCap = std::max(20, cap - 5);
++        stable = 0;
++        holdUntil = now + std::chrono::seconds(backoffSeconds);
++        backoffSeconds = std::min(backoffSeconds * 2, 300);
++    } else if (rate >= 19.85 && cap < user && now >= holdUntil) {
++        if (++stable >= 6) {
++            newCap = std::min(user, cap + 2);
++            stable = 0;
++        }
++    } else if (rate < 19.85) {
++        stable = 0;
++    }
++    if (newCap != cap) {
++        sAdaptiveCap = newCap;
++        PerfLog::WriteLine(fmt::format("[perf] adaptive_fps: ticks/s={:.2f} cap {} -> {} (user {})", rate, cap, newCap, user));
++    }
++}
++#else
++static uint32_t AdaptiveCap(uint32_t fps) {
++    return fps;
++}
++static void AdaptiveFpsTick() {}
++#endif
++
++static uint32_t BaseInterpolationFPS() {
+     if (CVarGetInteger(CVAR_SETTING("MatchRefreshRate"), 0)) {
+         return Ship::Context::GetInstance()->GetWindow()->GetCurrentRefreshRate();
+     } else if (CVarGetInteger(CVAR_VSYNC_ENABLED, 1) ||
+@@ -1179,6 +1256,10 @@ uint32_t OTRGlobals::GetInterpolationFPS() {
+     return CVarGetInteger(CVAR_SETTING("InterpolationFPS"), 20);
+ }
+ 
++uint32_t OTRGlobals::GetInterpolationFPS() {
++    return AdaptiveCap(BaseInterpolationFPS());
++}
++
+ extern "C" void OTRMessage_Init();
+ extern "C" void AudioMgr_CreateNextAudioBuffer(s16* samples, u32 num_samples);
+ extern "C" void AudioPlayer_Play(const uint8_t* buf, uint32_t len);
+@@ -1933,6 +2014,18 @@ void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>
+ 
+ // C->C++ Bridge
+ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
++#ifdef __ANDROID__
++    const auto perfTickStart = PerfLog::Now();
++    static bool sPinned = false;
++    if (!sPinned) {
++        sPinned = true;
++        // Optional: create the folder SOH/cpu_big to run the game thread on the fastest CPU cores.
++        if (PerfLog::FolderExists("cpu_big")) {
++            PerfLog::PinToFastestCores();
++        }
++    }
++    AdaptiveFpsTick();
++#endif
+     {
+         std::unique_lock<std::mutex> Lock(audio.mutex);
+         audio.processing = true;
+@@ -1970,6 +2063,14 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+ 
+     time -= fps;
+ 
++#ifdef __ANDROID__
++    if (PerfLog::Enabled()) {
++        PerfLog::SetExtra(fmt::format("res={:.2f} user_fps={} eff_fps={} adaptive={}",
++                                      CVarGetFloat("gSettings.InternalResolution", 1.0f), sAdaptiveUserFps.load(), fps,
++                                      AdaptiveEnabled() ? 1 : 0));
++    }
++    const auto perfInterpEnd = PerfLog::Now();
++#endif
+     if (wnd != nullptr) {
+         wnd->SetTargetFps(fps);
+     }
+@@ -1981,6 +2082,9 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+     }
+ 
+     RunCommands(commands, mtx_replacements);
++#ifdef __ANDROID__
++    const auto perfRenderEnd = PerfLog::Now();
++#endif
+ 
+     last_fps = fps;
+     last_update_rate = R_UPDATE_RATE;
+@@ -1991,6 +2095,9 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+             audio.cv_from_thread.wait(Lock);
+         }
+     }
++#ifdef __ANDROID__
++    PerfLog::Tick(perfTickStart, perfInterpEnd, perfRenderEnd, PerfLog::Now());
++#endif
+ 
+     bool curAltAssets = CVarGetInteger(CVAR_SETTING("AltAssets"), 1);
+     if (prevAltAssets != curAltAssets) {
