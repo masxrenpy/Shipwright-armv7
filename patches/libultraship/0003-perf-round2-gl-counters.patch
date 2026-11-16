@@ -1,5 +1,5 @@
 diff --git a/include/ship/PerfLog.h b/include/ship/PerfLog.h
-index 301ebbc..8efe8d8 100644
+index 301ebbc..391da16 100644
 --- a/include/ship/PerfLog.h
 +++ b/include/ship/PerfLog.h
 @@ -1,13 +1,18 @@
@@ -16,7 +16,7 @@ index 301ebbc..8efe8d8 100644
 +#include <unistd.h>
  #include <spdlog/fmt/fmt.h>
 +#ifdef __ANDROID__
-+#include <sched.h>
++#include <sys/syscall.h>
 +#endif
  
  namespace PerfLog {
@@ -109,14 +109,27 @@ index 301ebbc..8efe8d8 100644
  };
  
  inline State& S() {
-@@ -98,6 +168,72 @@ inline State& S() {
+@@ -98,6 +168,85 @@ inline State& S() {
      return state;
  }
  
++// CPU the calling thread is running on (getcpu syscall: sched_getcpu needs Android 10).
++inline int CurrentCpu() {
++#ifdef __ANDROID__
++    unsigned int cpu = 0;
++    if (syscall(__NR_getcpu, &cpu, nullptr, nullptr) != 0) {
++        return -1;
++    }
++    return (int)cpu;
++#else
++    return -1;
++#endif
++}
++
 +// Current CPU of the calling thread and the current frequency (MHz) of every core.
 +inline std::string CpuInfo() {
 +#ifdef __ANDROID__
-+    std::string out = fmt::format("cpu={} freq_mhz=", sched_getcpu());
++    std::string out = fmt::format("cpu={} freq_mhz=", CurrentCpu());
 +    long ncpu = sysconf(_SC_NPROCESSORS_CONF);
 +    if (ncpu > 16) {
 +        ncpu = 16;
@@ -165,16 +178,16 @@ index 301ebbc..8efe8d8 100644
 +        WriteLine("[perf] cpu_big: could not read the core frequencies");
 +        return;
 +    }
-+    cpu_set_t set;
-+    CPU_ZERO(&set);
++    unsigned long mask[2] = { 0, 0 };
++    const unsigned int bits = 8 * sizeof(unsigned long);
 +    std::string cores;
 +    for (long i = 0; i < ncpu; i++) {
 +        if (maxFreq[i] == best) {
-+            CPU_SET((int)i, &set);
++            mask[i / bits] |= 1UL << (i % bits);
 +            cores += fmt::format("{}{}", cores.empty() ? "" : ",", i);
 +        }
 +    }
-+    int rc = sched_setaffinity(0, sizeof(set), &set);
++    long rc = syscall(__NR_sched_setaffinity, 0, sizeof(mask), mask);
 +    WriteLine(fmt::format("[perf] cpu_big: max_freq_khz={} cores={} rc={}", best, cores, rc));
 +#endif
 +}
@@ -182,7 +195,7 @@ index 301ebbc..8efe8d8 100644
  // The caller holds the mutex.
  inline void MaybeFlush(State& s, Clock::time_point now) {
      double elapsed = Ms(s.windowStart, now) / 1000.0;
-@@ -105,17 +241,38 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
+@@ -105,17 +254,38 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
          return;
      }
      WriteLine(fmt::format(
@@ -226,7 +239,7 @@ index 301ebbc..8efe8d8 100644
      s.frameGap = Stat();
      s.run = Stat();
      s.gui = Stat();
-@@ -123,6 +280,11 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
+@@ -123,6 +293,11 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
      s.total = Stat();
      s.audioGap = Stat();
      s.buffered = Stat();
@@ -238,7 +251,7 @@ index 301ebbc..8efe8d8 100644
  }
  
  // One rendered frame: t0 start, t1 after the frame setup, t2 after the game commands, t3 after the GUI, t4 after the swap.
-@@ -146,6 +308,42 @@ inline void Frame(Clock::time_point t0, Clock::time_point t1, Clock::time_point
+@@ -146,6 +321,42 @@ inline void Frame(Clock::time_point t0, Clock::time_point t1, Clock::time_point
      MaybeFlush(s, t4);
  }
  
