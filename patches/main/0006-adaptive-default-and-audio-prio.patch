@@ -1,0 +1,92 @@
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 4b22083..30cbc49 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -1174,10 +1174,10 @@ namespace {
+ std::atomic<int> sAdaptiveCap{ 0 };
+ std::atomic<uint32_t> sAdaptiveUserFps{ 20 };
+ 
+-// Optional: create the folder SOH/adaptive_fps to keep the game at full speed on slow phones by lowering the
+-// interpolated FPS automatically when the game logic falls below 20 ticks per second.
++// Keeps the game at full speed on slow phones by lowering the interpolated FPS automatically when the game logic
++// falls below 20 ticks per second. It is on by default; create the folder SOH/adaptive_off to disable it.
+ bool AdaptiveEnabled() {
+-    static const bool enabled = PerfLog::FolderExists("adaptive_fps");
++    static const bool enabled = !PerfLog::FolderExists("adaptive_off");
+     return enabled;
+ }
+ } // namespace
+@@ -1197,23 +1197,39 @@ static void AdaptiveFpsTick() {
+         return;
+     }
+     using Clock = std::chrono::steady_clock;
+-    static Clock::time_point firstTick;
++    static const Clock::time_point processStart = Clock::now();
++    static Clock::time_point lastTick;
++    static bool haveLastTick = false;
+     static Clock::time_point holdUntil = Clock::now();
+-    static int ticks = 0;
++    static double activeSeconds = 0.0;
++    static int activeTicks = 0;
+     static int stable = 0;
+-    static int backoffSeconds = 30; // grows after every reduction so the cap does not keep oscillating
++    static int backoffSeconds = 20; // grows after every reduction so the cap does not keep oscillating
+     Clock::time_point now = Clock::now();
+-    if (ticks == 0) {
+-        firstTick = now;
++    if (!haveLastTick) {
++        lastTick = now;
++        haveLastTick = true;
++        return;
++    }
++    double gap = std::chrono::duration<double>(now - lastTick).count();
++    lastTick = now;
++    // Long gaps are scene loads or one-off hitches, not a lack of speed: they are not counted.
++    if (gap > 0.15) {
++        return;
++    }
++    activeSeconds += gap;
++    activeTicks++;
++    if (activeSeconds < 3.0) {
++        return;
+     }
+-    ticks++;
+-    double span = std::chrono::duration<double>(now - firstTick).count();
+-    if (span < 3.0) {
++    // Tick rate of the last window (the game runs at 20 ticks per second at full speed).
++    double rate = activeTicks / activeSeconds;
++    activeSeconds = 0.0;
++    activeTicks = 0;
++    // Nothing is decided during the first seconds (start-up, shader compilation).
++    if (std::chrono::duration<double>(now - processStart).count() < 30.0) {
+         return;
+     }
+-    // Exact tick rate of the last window (the game runs at 20 ticks per second at full speed).
+-    double rate = (ticks - 1) / span;
+-    ticks = 0;
+     int user = (int)sAdaptiveUserFps.load();
+     int cap = sAdaptiveCap.load();
+     if (cap <= 0) {
+@@ -1224,9 +1240,9 @@ static void AdaptiveFpsTick() {
+         newCap = std::max(20, cap - 5);
+         stable = 0;
+         holdUntil = now + std::chrono::seconds(backoffSeconds);
+-        backoffSeconds = std::min(backoffSeconds * 2, 300);
++        backoffSeconds = std::min(backoffSeconds * 2, 120);
+     } else if (rate >= 19.85 && cap < user && now >= holdUntil) {
+-        if (++stable >= 6) {
++        if (++stable >= 5) {
+             newCap = std::min(user, cap + 2);
+             stable = 0;
+         }
+@@ -1269,8 +1285,8 @@ std::unordered_map<std::string, ExtensionEntry> ExtensionCache;
+ 
+ void OTRAudio_Thread() {
+ #ifdef __ANDROID__
+-    // Optional: create the folder SOH/audio_prio to run the audio thread with a higher priority.
+-    if (PerfLog::FolderExists("audio_prio")) {
++    // The audio thread runs with a higher priority; create the folder SOH/audio_prio_off to disable it.
++    if (!PerfLog::FolderExists("audio_prio_off")) {
+         errno = 0;
+         int rc = setpriority(PRIO_PROCESS, 0, -16);
+         PerfLog::WriteLine(fmt::format("[perf] audio thread priority: rc={} errno={}", rc, errno));
