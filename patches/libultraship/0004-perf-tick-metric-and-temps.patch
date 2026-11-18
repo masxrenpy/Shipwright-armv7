@@ -1,0 +1,102 @@
+diff --git a/include/ship/PerfLog.h b/include/ship/PerfLog.h
+index 391da16..69c17e9 100644
+--- a/include/ship/PerfLog.h
++++ b/include/ship/PerfLog.h
+@@ -7,6 +7,7 @@
+ #include <cstdio>
+ #include <mutex>
+ #include <string>
++#include <dirent.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+ #include <spdlog/fmt/fmt.h>
+@@ -147,6 +148,7 @@ struct State {
+     Clock::time_point lastFrame;
+     Clock::time_point lastAudio;
+     Clock::time_point lastTick;
++    Clock::time_point lastTickEnd;
+     bool haveLastFrame = false;
+     bool haveLastAudio = false;
+     bool haveLastTick = false;
+@@ -207,6 +209,51 @@ inline std::string CpuInfo() {
+ #endif
+ }
+ 
++// Reads the first number of a small text file (-1 when it cannot be read).
++inline long ReadNumber(const std::string& path) {
++    long value = -1;
++    FILE* f = fopen(path.c_str(), "r");
++    if (f != nullptr) {
++        if (fscanf(f, "%ld", &value) != 1) {
++            value = -1;
++        }
++        fclose(f);
++    }
++    return value;
++}
++
++// Battery and thermal-zone temperatures (degrees C) and the clock (MHz) of devices that expose it, when readable.
++inline std::string ThermalInfo() {
++#ifdef __ANDROID__
++    std::string out = "temps_c=";
++    long battery = ReadNumber("/sys/class/power_supply/battery/temp"); // tenths of a degree
++    out += fmt::format("bat:{}", battery >= 0 ? fmt::format("{:.1f}", battery / 10.0) : std::string("n/a"));
++    for (int i = 0; i < 12; i++) {
++        long milli = ReadNumber(fmt::format("/sys/class/thermal/thermal_zone{}/temp", i));
++        if (milli > 0) {
++            out += fmt::format(",tz{}:{:.0f}", i, milli > 1000 ? milli / 1000.0 : (double)milli);
++        }
++    }
++    std::string devfreq;
++    DIR* dir = opendir("/sys/class/devfreq");
++    if (dir != nullptr) {
++        while (struct dirent* entry = readdir(dir)) {
++            if (entry->d_name[0] == '.') {
++                continue;
++            }
++            long hz = ReadNumber(fmt::format("/sys/class/devfreq/{}/cur_freq", entry->d_name));
++            if (hz > 0) {
++                devfreq += fmt::format("{}{}:{}", devfreq.empty() ? "" : ",", entry->d_name, hz / 1000000);
++            }
++        }
++        closedir(dir);
++    }
++    return out + " devfreq_mhz=" + (devfreq.empty() ? std::string("n/a") : devfreq);
++#else
++    return std::string();
++#endif
++}
++
+ // Pins the calling thread to the cores with the highest maximum frequency.
+ inline void PinToFastestCores() {
+ #ifdef __ANDROID__
+@@ -275,10 +322,10 @@ inline void MaybeFlush(State& s, Clock::time_point now) {
+     WriteLine(fmt::format(
+         "   + gl per frame: draws={:.0f} tris={:.0f} draw_ms={:.1f} uploads={:.1f} upload_ms={:.2f} | shader_compiles={} "
+         "total/max_ms={:.1f}/{:.1f} | ticks={} tick_ms gap avg/max={:.1f}/{:.1f} interp={:.1f}/{:.1f} render={:.1f}/{:.1f} "
+-        "audio_wait={:.1f}/{:.1f} logic~={:.1f}/{:.1f} | {} | {}",
++        "audio_wait={:.1f}/{:.1f} logic={:.1f}/{:.1f} | {} | {} | {}",
+         draws / frames, tris / frames, drawMs / frames, uploads / frames, uploadMs / frames, compiles, compileMs,
+         compileMax, s.ticks, s.tickGap.Avg(), s.tickGap.max, s.interp.Avg(), s.interp.max, s.render.Avg(), s.render.max,
+-        s.audioWait.Avg(), s.audioWait.max, s.logic.Avg(), s.logic.max, CpuInfo(), s.extra));
++        s.audioWait.Avg(), s.audioWait.max, s.logic.Avg(), s.logic.max, CpuInfo(), ThermalInfo(), s.extra));
+ 
+     s.windowStart = now;
+     s.frames = 0;
+@@ -334,12 +381,12 @@ inline void Tick(Clock::time_point start, Clock::time_point interpEnd, Clock::ti
+     double render = Ms(interpEnd, renderEnd);
+     double audioWait = Ms(renderEnd, audioEnd);
+     if (s.haveLastTick) {
+-        double gap = Ms(s.lastTick, start);
+-        s.tickGap.Add(gap);
+-        double logic = gap - (interp + render + audioWait);
+-        s.logic.Add(logic > 0 ? logic : 0);
++        s.tickGap.Add(Ms(s.lastTick, start));
++        // game logic = time between the end of the previous tick and the start of this one
++        s.logic.Add(Ms(s.lastTickEnd, start));
+     }
+     s.lastTick = start;
++    s.lastTickEnd = audioEnd;
+     s.haveLastTick = true;
+     s.interp.Add(interp);
+     s.render.Add(render);
