@@ -1,0 +1,178 @@
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 30cbc49..37c2f21 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -2,6 +2,7 @@
+ #include "OTRAudio.h"
+ #ifdef __ANDROID__
+ #include <chrono>
++#include <cmath>
+ #include <errno.h>
+ #include <sys/resource.h>
+ #include <spdlog/fmt/fmt.h>
+@@ -1171,15 +1172,55 @@ bool OTRGlobals::HasOriginal() {
+ 
+ #ifdef __ANDROID__
+ namespace {
+-std::atomic<int> sAdaptiveCap{ 0 };
++std::atomic<int> sAdaptiveLevel{ 0 }; // 0 = everything as the user configured it
+ std::atomic<uint32_t> sAdaptiveUserFps{ 20 };
++std::atomic<float> sAdaptiveEffRes{ 1.0f };
+ 
+-// Keeps the game at full speed on slow phones by lowering the interpolated FPS automatically when the game logic
+-// falls below 20 ticks per second. It is on by default; create the folder SOH/adaptive_off to disable it.
++// Keeps the game at full speed on slow phones. When the game logic falls below 20 ticks per second the quality goes
++// down step by step (internal resolution first, then the interpolated FPS) and goes back up when there is room.
++// It is on by default. Create the folder SOH/adaptive_off to disable it, or SOH/adaptive_keep_res to leave the
++// resolution alone and only lower the FPS.
+ bool AdaptiveEnabled() {
+     static const bool enabled = !PerfLog::FolderExists("adaptive_off");
+     return enabled;
+ }
++
++bool AdaptiveChangesResolution() {
++    static const bool enabled = !PerfLog::FolderExists("adaptive_keep_res");
++    return enabled;
++}
++
++constexpr float kAdaptiveLowResolution = 0.5f;
++
++struct AdaptiveStep {
++    float resolution;
++    int fps;
++};
++
++struct AdaptiveLadder {
++    AdaptiveStep steps[4];
++    int count = 0;
++};
++
++// Quality ladder, best first. Measured on a Helio G25 / PowerVR GE8320: half resolution sustains 25 FPS where full
++// resolution sustains 20, while 75% saves almost nothing.
++AdaptiveLadder MakeAdaptiveLadder(float userRes, int userFps) {
++    AdaptiveLadder ladder;
++    ladder.steps[ladder.count++] = { userRes, userFps };
++    float low = std::min(userRes, kAdaptiveLowResolution);
++    float res = userRes;
++    if (AdaptiveChangesResolution() && low < userRes - 0.01f) {
++        res = low;
++        ladder.steps[ladder.count++] = { res, userFps };
++    }
++    if (userFps > 25) {
++        ladder.steps[ladder.count++] = { res, 25 };
++    }
++    if (userFps > 20) {
++        ladder.steps[ladder.count++] = { res, 20 };
++    }
++    return ladder;
++}
+ } // namespace
+ 
+ static uint32_t AdaptiveCap(uint32_t fps) {
+@@ -1187,8 +1228,33 @@ static uint32_t AdaptiveCap(uint32_t fps) {
+         return fps;
+     }
+     sAdaptiveUserFps = fps;
+-    int cap = sAdaptiveCap.load();
+-    return (cap > 0 && (uint32_t)cap < fps) ? (uint32_t)cap : fps;
++    AdaptiveLadder ladder = MakeAdaptiveLadder(CVarGetFloat("gSettings.InternalResolution", 1.0f), (int)fps);
++    int level = std::min(sAdaptiveLevel.load(), ladder.count - 1);
++    return (uint32_t)std::min(ladder.steps[level].fps, (int)fps);
++}
++
++// Applies the internal resolution of the current quality level. Runs on the render thread, once per game tick.
++static void AdaptiveApplyResolution() {
++    if (!AdaptiveChangesResolution() || CVarGetInteger("gAdvancedResolution.Enabled", 0) != 0) {
++        return;
++    }
++    static float lastApplied = -1.0f;
++    static float lastUser = -1.0f;
++    float userRes = CVarGetFloat("gSettings.InternalResolution", 1.0f);
++    AdaptiveLadder ladder = MakeAdaptiveLadder(userRes, (int)sAdaptiveUserFps.load());
++    int level = std::min(sAdaptiveLevel.load(), ladder.count - 1);
++    float wanted = ladder.steps[level].resolution;
++    // when the user moves the slider the menu has just applied the user's value: apply ours again
++    bool userChanged = std::fabs(userRes - lastUser) > 0.001f;
++    lastUser = userRes;
++    if (std::fabs(wanted - lastApplied) > 0.001f || (userChanged && level > 0)) {
++        auto window = Ship::Context::GetInstance()->GetWindow();
++        if (window != nullptr) {
++            window->SetResolutionMultiplier(wanted);
++            lastApplied = wanted;
++            sAdaptiveEffRes = wanted;
++        }
++    }
+ }
+ 
+ // Called once per game tick.
+@@ -1196,6 +1262,7 @@ static void AdaptiveFpsTick() {
+     if (!AdaptiveEnabled()) {
+         return;
+     }
++    AdaptiveApplyResolution();
+     using Clock = std::chrono::steady_clock;
+     static const Clock::time_point processStart = Clock::now();
+     static Clock::time_point lastTick;
+@@ -1204,7 +1271,7 @@ static void AdaptiveFpsTick() {
+     static double activeSeconds = 0.0;
+     static int activeTicks = 0;
+     static int stable = 0;
+-    static int backoffSeconds = 20; // grows after every reduction so the cap does not keep oscillating
++    static int backoffSeconds = 20; // grows after every reduction so the quality does not keep oscillating
+     Clock::time_point now = Clock::now();
+     if (!haveLastTick) {
+         lastTick = now;
+@@ -1230,28 +1297,27 @@ static void AdaptiveFpsTick() {
+     if (std::chrono::duration<double>(now - processStart).count() < 30.0) {
+         return;
+     }
+-    int user = (int)sAdaptiveUserFps.load();
+-    int cap = sAdaptiveCap.load();
+-    if (cap <= 0) {
+-        cap = user;
+-    }
+-    int newCap = cap;
+-    if (rate < 19.4 && cap > 20) {
+-        newCap = std::max(20, cap - 5);
++    AdaptiveLadder ladder =
++        MakeAdaptiveLadder(CVarGetFloat("gSettings.InternalResolution", 1.0f), (int)sAdaptiveUserFps.load());
++    int level = std::min(sAdaptiveLevel.load(), ladder.count - 1);
++    int newLevel = level;
++    if (rate < 19.4 && level < ladder.count - 1) {
++        newLevel = level + 1;
+         stable = 0;
+         holdUntil = now + std::chrono::seconds(backoffSeconds);
+         backoffSeconds = std::min(backoffSeconds * 2, 120);
+-    } else if (rate >= 19.85 && cap < user && now >= holdUntil) {
++    } else if (rate >= 19.85 && level > 0 && now >= holdUntil) {
+         if (++stable >= 5) {
+-            newCap = std::min(user, cap + 2);
++            newLevel = level - 1;
+             stable = 0;
+         }
+     } else if (rate < 19.85) {
+         stable = 0;
+     }
+-    if (newCap != cap) {
+-        sAdaptiveCap = newCap;
+-        PerfLog::WriteLine(fmt::format("[perf] adaptive_fps: ticks/s={:.2f} cap {} -> {} (user {})", rate, cap, newCap, user));
++    if (newLevel != level) {
++        sAdaptiveLevel = newLevel;
++        PerfLog::WriteLine(fmt::format("[perf] adaptive: ticks/s={:.2f} level {} -> {} (res {:.2f}, fps {})", rate,
++                                       level, newLevel, ladder.steps[newLevel].resolution, ladder.steps[newLevel].fps));
+     }
+ }
+ #else
+@@ -2081,9 +2147,9 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+ 
+ #ifdef __ANDROID__
+     if (PerfLog::Enabled()) {
+-        PerfLog::SetExtra(fmt::format("res={:.2f} user_fps={} eff_fps={} adaptive={}",
+-                                      CVarGetFloat("gSettings.InternalResolution", 1.0f), sAdaptiveUserFps.load(), fps,
+-                                      AdaptiveEnabled() ? 1 : 0));
++        PerfLog::SetExtra(fmt::format("res={:.2f} res_eff={:.2f} user_fps={} eff_fps={} adaptive={} level={}",
++                                      CVarGetFloat("gSettings.InternalResolution", 1.0f), sAdaptiveEffRes.load(),
++                                      sAdaptiveUserFps.load(), fps, AdaptiveEnabled() ? 1 : 0, sAdaptiveLevel.load()));
+     }
+     const auto perfInterpEnd = PerfLog::Now();
+ #endif
